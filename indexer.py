@@ -4,6 +4,7 @@ from database import Database
 from xrpl_client import XRPLClient
 from config import Config
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class XRPLIndexer:
@@ -75,6 +76,43 @@ class XRPLIndexer:
         print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count}")
         return stored_count
     
+    def process_ledgers_parallel(self, ledgers_to_process: list) -> int:
+        """Process multiple ledgers in parallel using ThreadPoolExecutor"""
+        total_stored = 0
+        completed = 0
+        total_ledgers = len(ledgers_to_process)
+        failed_ledgers = []
+        
+        with ThreadPoolExecutor(max_workers=Config.PARALLEL_WORKERS) as executor:
+            # Submit all ledger processing tasks
+            future_to_ledger = {
+                executor.submit(self.process_ledger, ledger_index): ledger_index 
+                for ledger_index in ledgers_to_process
+            }
+            
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_ledger):
+                ledger_index = future_to_ledger[future]
+                try:
+                    stored = future.result()
+                    total_stored += stored
+                    completed += 1
+                    
+                    # Show progress
+                    if completed % 10 == 0 or completed == total_ledgers:
+                        print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
+                        
+                except Exception as e:
+                    print(f"Error processing ledger {ledger_index}: {e}")
+                    failed_ledgers.append((ledger_index, str(e)))
+        
+        # If any ledgers failed, raise an exception to prevent index update
+        if failed_ledgers:
+            error_msg = f"Failed to process {len(failed_ledgers)} ledger(s): {', '.join([str(l[0]) for l in failed_ledgers])}"
+            raise Exception(error_msg)
+        
+        return total_stored
+    
     def run_indexing_cycle(self):
         """Run a single indexing cycle"""
         try:
@@ -105,18 +143,24 @@ class XRPLIndexer:
             
             print(f"Processing {total_ledgers} ledgers ({last_processed + 1} to {current_ledger_index})...")
             
-            total_stored = 0
-            for i, ledger_index in enumerate(ledgers_to_process, 1):
-                stored = self.process_ledger(ledger_index)
-                total_stored += stored
-                
-                # Show progress
-                if i % 10 == 0 or i == total_ledgers:
-                    print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
-                
-                # Small delay to avoid overwhelming the API
-                if i < total_ledgers:
-                    time.sleep(0.1)
+            # Check if parallel processing is enabled
+            if Config.ENABLE_PARALLEL_PROCESSING:
+                print(f"Using parallel processing with {Config.PARALLEL_WORKERS} workers")
+                total_stored = self.process_ledgers_parallel(ledgers_to_process)
+            else:
+                # Sequential processing (original behavior)
+                total_stored = 0
+                for i, ledger_index in enumerate(ledgers_to_process, 1):
+                    stored = self.process_ledger(ledger_index)
+                    total_stored += stored
+                    
+                    # Show progress
+                    if i % 10 == 0 or i == total_ledgers:
+                        print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
+                    
+                    # Small delay to avoid overwhelming the API
+                    if i < total_ledgers:
+                        time.sleep(0.1)
             
             # Update last processed index
             self.db.update_last_processed_ledger_index(current_ledger_index)

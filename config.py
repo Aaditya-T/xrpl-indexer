@@ -16,6 +16,10 @@ class Config:
     # Indexer Settings
     CRON_INTERVAL_MINUTES = int(os.getenv("CRON_INTERVAL_MINUTES", "5"))
     
+    # Parallel Processing Settings (disabled by default)
+    ENABLE_PARALLEL_PROCESSING = os.getenv("ENABLE_PARALLEL_PROCESSING", "false").lower() == "true"
+    PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "5"))  # Number of concurrent ledger processors
+    
     # Transaction Filters (optional, comma-separated)
     FILTER_TRANSACTION_TYPES = os.getenv("FILTER_TRANSACTION_TYPES", "")  # e.g., "Payment,NFTokenMint"
     FILTER_ADDRESSES = os.getenv("FILTER_ADDRESSES", "")  # e.g., "rN7n7otQDd6FczFgLdlqtyMVrn3eBsePke"

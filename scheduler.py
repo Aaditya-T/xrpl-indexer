@@ -46,6 +46,11 @@ class IndexerScheduler:
         print(f"  - Database Type: {Config.DATABASE_TYPE}")
         print(f"  - Cron Interval: Every {interval_minutes} minute(s)")
         
+        if Config.ENABLE_PARALLEL_PROCESSING:
+            print(f"  - Parallel Processing: ENABLED ({Config.PARALLEL_WORKERS} workers)")
+        else:
+            print(f"  - Parallel Processing: DISABLED (sequential mode)")
+        
         if Config.get_filter_transaction_types():
             print(f"  - Transaction Type Filter: {', '.join(Config.get_filter_transaction_types())}")
         
