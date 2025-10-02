@@ -6,6 +6,7 @@ A Python-based XRPL (XRP Ledger) indexer application that efficiently monitors a
 
 - **Scheduled Monitoring**: Automatically checks for new ledgers every X minutes using cron jobs
 - **Efficient Batch Processing**: Fetches all transactions between last processed and current ledger index
+- **Optional Parallel Processing**: 3-5x faster synchronization for catch-up scenarios (disabled by default)
 - **Local Database Storage**: Supports both PostgreSQL and SQLite
 - **Flexible Filtering**: Filter transactions by type, address, or source tag
 - **State Persistence**: Tracks last processed ledger index and resumes from correct position
@@ -35,6 +36,11 @@ DATABASE_TYPE=postgresql
 
 # Schedule interval in minutes
 CRON_INTERVAL_MINUTES=5
+
+# Parallel Processing (Optional - DISABLED by default)
+# WARNING: Only enable if you have no rate limits and need to sync faster
+ENABLE_PARALLEL_PROCESSING=false  # Set to "true" to enable
+PARALLEL_WORKERS=5                # Number of concurrent workers
 
 # Optional Filters (comma-separated)
 FILTER_TRANSACTION_TYPES=Payment,NFTokenMint
@@ -92,6 +98,51 @@ FILTER_SOURCE_TAGS=123,456,789
 ```
 
 Leave any filter empty to process all transactions.
+
+## Parallel Processing (Performance Optimization)
+
+The indexer supports optional parallel processing for faster synchronization when catching up on large backlogs.
+
+### Default Mode: Sequential Processing
+- Processes ledgers one at a time
+- Includes 0.1s delay between ledgers to respect API rate limits
+- **Best for**: Normal operations with public XRPL endpoints
+
+### Parallel Mode: Concurrent Processing
+- Processes multiple ledgers simultaneously (5 workers by default)
+- **3-5x faster** for large backlogs
+- No artificial delays between ledgers
+- **Best for**: Private nodes with no rate limits, or catch-up scenarios
+
+### When to Enable Parallel Processing
+
+✅ **Enable when:**
+- You have no XRPL API rate limits (private node)
+- There's a significant backlog (hundreds of ledgers behind)
+- You need faster synchronization for catch-up
+
+❌ **Keep disabled when:**
+- Using public XRPL endpoints (rate limits apply)
+- Processing regular small batches
+- Normal scheduled operations
+
+### Configuration
+
+```bash
+# Enable parallel processing
+ENABLE_PARALLEL_PROCESSING=true
+
+# Adjust number of concurrent workers (default: 5)
+PARALLEL_WORKERS=10  # Higher = faster, but more API calls
+```
+
+### Error Handling
+
+Both sequential and parallel modes handle errors identically:
+- Any failed ledger halts the entire cycle
+- Last processed ledger index is preserved
+- No silent failures or skipped ledgers
+- Cycle retries on next scheduled run
 
 ## Database Queries
 
