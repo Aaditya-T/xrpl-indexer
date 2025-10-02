@@ -1,9 +1,10 @@
 """Database models and operations for XRPL Indexer"""
 import psycopg2
+import psycopg2.extensions
 from psycopg2.extras import RealDictCursor
 import sqlite3
 import json
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from config import Config
 
 
@@ -12,7 +13,7 @@ class Database:
     
     def __init__(self):
         self.db_type = Config.DATABASE_TYPE
-        self.conn = None
+        self.conn: Union[psycopg2.extensions.connection, sqlite3.Connection]
         self.connect()
         self.create_tables()
     
@@ -107,7 +108,10 @@ class Database:
         cursor.close()
         
         if result:
-            return result[0] if self.db_type == "sqlite" else result['last_processed_ledger_index']
+            if self.db_type == "sqlite":
+                return result[0]  # type: ignore
+            else:
+                return result['last_processed_ledger_index']  # type: ignore
         return None
     
     def update_last_processed_ledger_index(self, ledger_index: int):
@@ -177,9 +181,9 @@ class Database:
         """Get total number of transactions stored"""
         cursor = self.conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM transactions")
-        count = cursor.fetchone()[0]
+        result = cursor.fetchone()
         cursor.close()
-        return count
+        return result[0] if result else 0  # type: ignore
     
     def close(self):
         """Close database connection"""
