@@ -1,7 +1,7 @@
 [project]
-name = "repl-nix-workspace"
+name = "xrpl-indexer"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Python-based XRPL (XRP Ledger) indexer application that efficiently monitors and processes blockchain data using scheduled intervals"
 requires-python = ">=3.11"
 dependencies = [
     "apscheduler>=3.11.0",

@@ -1,4 +1,3 @@
-"""Core XRPL Indexer Logic"""
 from typing import Optional
 from database import Database
 from xrpl_client import XRPLClient

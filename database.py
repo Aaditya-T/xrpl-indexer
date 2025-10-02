@@ -1,4 +1,3 @@
-"""Database models and operations for XRPL Indexer"""
 import psycopg2
 import psycopg2.extensions
 from psycopg2.extras import RealDictCursor

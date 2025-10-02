@@ -1,9 +1,7 @@
-"""Configuration for XRPL Indexer"""
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
-
 
 class Config:
     XRPL_JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", "https://s1.ripple.com:51234/")
