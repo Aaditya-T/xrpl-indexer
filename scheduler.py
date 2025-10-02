@@ -30,7 +30,7 @@ class IndexerScheduler:
     def run_indexer_job(self):
         """Job function to run indexing cycle"""
         print(f"\n{'='*60}")
-        print(f"Running scheduled indexing job...")
+        print("Running scheduled indexing job...")
         print(f"{'='*60}")
         self.indexer.run_indexing_cycle()
         print(f"{'='*60}\n")
@@ -39,9 +39,9 @@ class IndexerScheduler:
         """Start the scheduler with configured interval"""
         interval_minutes = Config.CRON_INTERVAL_MINUTES
         
-        print(f"XRPL Indexer Scheduler Started")
+        print("XRPL Indexer Scheduler Started")
         print(f"{'='*60}")
-        print(f"Configuration:")
+        print("Configuration:")
         print(f"  - XRPL RPC URL: {Config.XRPL_JSON_RPC_URL}")
         print(f"  - Database Type: {Config.DATABASE_TYPE}")
         print(f"  - Cron Interval: Every {interval_minutes} minute(s)")
@@ -49,7 +49,7 @@ class IndexerScheduler:
         if Config.ENABLE_PARALLEL_PROCESSING:
             print(f"  - Parallel Processing: ENABLED ({Config.PARALLEL_WORKERS} workers)")
         else:
-            print(f"  - Parallel Processing: DISABLED (sequential mode)")
+            print("  - Parallel Processing: DISABLED (sequential mode)")
         
         if Config.get_filter_transaction_types():
             print(f"  - Transaction Type Filter: {', '.join(Config.get_filter_transaction_types())}")
@@ -62,12 +62,9 @@ class IndexerScheduler:
         
         print(f"{'='*60}\n")
         
-        # Run immediately on start
         print("Running initial indexing cycle...")
         self.run_indexer_job()
         
-        # Schedule recurring job
-        # Use cron trigger to run every X minutes
         self.scheduler.add_job(
             self.run_indexer_job,
             trigger=CronTrigger(minute=f'*/{interval_minutes}'),

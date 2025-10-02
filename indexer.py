@@ -121,7 +121,6 @@ class XRPLIndexer:
             last_processed = self.db.get_last_processed_ledger_index()
             
             if last_processed is None:
-                # First run - store current index and wait for next cycle
                 print("First run detected. Storing current ledger index and waiting for next cycle...")
                 self.db.update_last_processed_ledger_index(current_ledger_index)
                 print(f"Stored ledger index: {current_ledger_index}")
@@ -133,35 +132,29 @@ class XRPLIndexer:
                 print("No new ledgers to process.")
                 return
             
-            # Process ledgers from last_processed + 1 to current_ledger_index
             ledgers_to_process = list(range(last_processed + 1, current_ledger_index + 1))
             total_ledgers = len(ledgers_to_process)
             
             print(f"Processing {total_ledgers} ledgers ({last_processed + 1} to {current_ledger_index})...")
             
-            # Check if parallel processing is enabled
             if Config.ENABLE_PARALLEL_PROCESSING:
                 print(f"Using parallel processing with {Config.PARALLEL_WORKERS} workers")
                 total_stored = self.process_ledgers_parallel(ledgers_to_process)
             else:
-                # Sequential processing (original behavior)
                 total_stored = 0
                 for i, ledger_index in enumerate(ledgers_to_process, 1):
                     stored = self.process_ledger(ledger_index)
                     total_stored += stored
                     
-                    # Show progress
                     if i % 10 == 0 or i == total_ledgers:
                         print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
                     
-                    # Small delay to avoid overwhelming the API
                     if i < total_ledgers:
                         time.sleep(0.1)
             
-            # Update last processed index
             self.db.update_last_processed_ledger_index(current_ledger_index)
             
-            print(f"\nIndexing cycle complete!")
+            print("\nIndexing cycle complete!")
             print(f"Processed ledgers: {last_processed + 1} to {current_ledger_index}")
             print(f"Total transactions stored: {total_stored}")
             print(f"Total transactions in database: {self.db.get_transaction_count()}")

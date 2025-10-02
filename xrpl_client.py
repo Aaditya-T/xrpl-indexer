@@ -8,7 +8,7 @@ from config import Config
 class XRPLClient:
     """Wrapper for XRPL JSON RPC client"""
     
-    def __init__(self, json_rpc_url: str = None):
+    def __init__(self, json_rpc_url: str | None = None):
         self.json_rpc_url = json_rpc_url or Config.XRPL_JSON_RPC_URL
         self.client = JsonRpcClient(self.json_rpc_url)
     
