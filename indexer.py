@@ -51,7 +51,6 @@ class XRPLIndexer:
         
         for tx in transactions:
             if isinstance(tx, dict):
-                # Extract transaction data - check for tx_json first, then tx, then use root
                 if 'tx_json' in tx:
                     tx_data = tx['tx_json'].copy()
                     # Add metadata from root level
@@ -116,11 +115,9 @@ class XRPLIndexer:
     def run_indexing_cycle(self):
         """Run a single indexing cycle"""
         try:
-            # Get current ledger index from XRPL
             current_ledger_index = self.xrpl_client.get_current_ledger_index()
             print(f"\nCurrent ledger index: {current_ledger_index}")
             
-            # Get last processed ledger index from database
             last_processed = self.db.get_last_processed_ledger_index()
             
             if last_processed is None:
@@ -132,7 +129,6 @@ class XRPLIndexer:
             
             print(f"Last processed ledger index: {last_processed}")
             
-            # Calculate ledgers to process
             if current_ledger_index <= last_processed:
                 print("No new ledgers to process.")
                 return
