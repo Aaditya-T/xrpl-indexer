@@ -179,10 +179,12 @@ class Database:
     def get_transaction_count(self) -> int:
         """Get total number of transactions stored"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM transactions")
+        cursor.execute("SELECT COUNT(*) as count FROM transactions")
         result = cursor.fetchone()
         cursor.close()
-        return result[0] if result else 0  # type: ignore
+        if not result:
+            return 0
+        return result[0] if self.db_type == "sqlite" else result['count']  # type: ignore
     
     def close(self):
         """Close database connection"""

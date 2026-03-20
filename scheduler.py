@@ -22,7 +22,10 @@ class IndexerScheduler:
     def shutdown(self, signum=None, frame=None):
         """Gracefully shutdown the scheduler"""
         print("\nShutting down indexer...")
-        self.scheduler.shutdown(wait=False)
+        try:
+            self.scheduler.shutdown(wait=False)
+        except Exception:
+            pass
         self.indexer.close()
         sys.exit(0)
     
