@@ -1,4 +1,3 @@
-"""XRPL Client for interacting with XRP Ledger"""
 from xrpl.clients import JsonRpcClient
 from xrpl.models.requests import Ledger, Tx
 from typing import Optional, List, Dict, Any
