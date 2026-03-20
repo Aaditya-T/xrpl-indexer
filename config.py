@@ -5,11 +5,32 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _build_database_url() -> str:
+    """Build DATABASE_URL from individual DB_* variables if DATABASE_URL is not set"""
+    if os.getenv("DATABASE_URL"):
+        return os.getenv("DATABASE_URL")  # type: ignore
+
+    db_type = os.getenv("DATABASE_TYPE", "postgresql")
+    if db_type == "sqlite":
+        return "sqlite:///xrpl_indexer.db"
+
+    host = os.getenv("DB_HOST", "localhost")
+    port = os.getenv("DB_PORT", "5432")
+    user = os.getenv("DB_USER", "")
+    password = os.getenv("DB_PASSWORD", "")
+    name = os.getenv("DB_NAME", "")
+
+    if not all([user, password, name]):
+        return "sqlite:///xrpl_indexer.db"
+
+    return f"postgresql://{user}:{password}@{host}:{port}/{name}"
+
+
 class Config:
     XRPL_JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", "https://s1.ripple.com:51234/")
-    
+
     DATABASE_TYPE = os.getenv("DATABASE_TYPE", "postgresql")
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///xrpl_indexer.db")
+    DATABASE_URL = _build_database_url()
     
     CRON_INTERVAL_MINUTES = int(os.getenv("CRON_INTERVAL_MINUTES", "5"))
     
