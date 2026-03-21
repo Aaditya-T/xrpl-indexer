@@ -5,7 +5,9 @@ description = "A Python-based XRPL (XRP Ledger) indexer application that efficie
 requires-python = ">=3.11"
 dependencies = [
     "apscheduler>=3.11.0",
+    "fastapi>=0.135.1",
     "psycopg2-binary>=2.9.10",
     "python-dotenv>=1.1.1",
+    "uvicorn>=0.42.0",
     "xrpl-py>=4.3.0",
 ]
