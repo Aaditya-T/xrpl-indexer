@@ -286,6 +286,11 @@ def _extract_tx_fields(row: dict, include_full: bool) -> dict:
     if not isinstance(raw, dict):
         raw = {}
 
+    # The indexer stores a _full_data sub-object with the canonical fields.
+    # Fall back to the top-level dict for older records that don't have it.
+    full = raw.get("_full_data") if isinstance(raw.get("_full_data"), dict) else raw
+    meta = full.get("meta") if isinstance(full.get("meta"), dict) else None
+
     result: dict = {
         "id": row.get("id"),
         "ledger_index": row.get("ledger_index"),
@@ -297,13 +302,13 @@ def _extract_tx_fields(row: dict, include_full: bool) -> dict:
         "source_tag": row.get("source_tag"),
         "destination_tag": row.get("destination_tag"),
         "created_at": str(row.get("created_at")) if row.get("created_at") else None,
-        "close_time_iso": raw.get("close_time_iso"),
-        "tx_index": raw.get("meta", {}).get("TransactionIndex") if isinstance(raw.get("meta"), dict) else None,
+        "close_time_iso": full.get("close_time_iso"),
+        "tx_index": meta.get("TransactionIndex") if meta else None,
     }
 
     if include_full:
-        result["tx_json"] = raw.get("tx_json") or {k: v for k, v in raw.items() if k not in ("meta", "close_time_iso")}
-        result["meta"] = raw.get("meta")
+        result["tx_json"] = full.get("tx_json")
+        result["meta"] = meta
 
     return result
 
