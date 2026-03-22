@@ -1,4 +1,5 @@
 """Lightweight FastAPI for querying XRPL Indexer data"""
+import base64
 import json
 import psycopg2
 import psycopg2.extras
@@ -257,3 +258,104 @@ def top_accounts(
         )
         rows = rows_to_list(cur.fetchall())
     return {"data": rows}
+
+
+# ---------------------------------------------------------------------------
+# Sync
+# ---------------------------------------------------------------------------
+
+def _encode_cursor(row_id: int) -> str:
+    return base64.urlsafe_b64encode(str(row_id).encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> int:
+    try:
+        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid cursor value")
+
+
+def _extract_tx_fields(row: dict, include_full: bool) -> dict:
+    """Build the response dict for a single transaction row."""
+    raw: Any = row.get("transaction_data")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+
+    result: dict = {
+        "id": row.get("id"),
+        "ledger_index": row.get("ledger_index"),
+        "transaction_hash": row.get("transaction_hash"),
+        "transaction_type": row.get("transaction_type"),
+        "account": row.get("account"),
+        "destination": row.get("destination"),
+        "fee": row.get("fee"),
+        "source_tag": row.get("source_tag"),
+        "destination_tag": row.get("destination_tag"),
+        "created_at": str(row.get("created_at")) if row.get("created_at") else None,
+        "close_time_iso": raw.get("close_time_iso"),
+        "tx_index": raw.get("meta", {}).get("TransactionIndex") if isinstance(raw.get("meta"), dict) else None,
+    }
+
+    if include_full:
+        result["tx_json"] = raw.get("tx_json") or {k: v for k, v in raw.items() if k not in ("meta", "close_time_iso")}
+        result["meta"] = raw.get("meta")
+
+    return result
+
+
+@app.get("/sync/transactions")
+def sync_transactions(
+    after_ledger: Optional[int] = Query(default=None, description="Return transactions with ledger_index > this value"),
+    cursor: Optional[str] = Query(default=None, description="Opaque cursor from a previous response for pagination"),
+    limit: int = Query(default=100, ge=1, le=1000, description="Max transactions to return"),
+    include_full: bool = Query(default=False, description="Include full tx_json, meta, and close_time_iso"),
+):
+    """
+    Stream transactions in ascending ledger order, suitable for syncing.
+
+    - Start with `after_ledger` to begin from a known ledger.
+    - Use the returned `next_cursor` on subsequent calls to page forward.
+    - `include_full=true` adds tx_json, meta, and close_time_iso to each record.
+    - Returns `has_more=false` when you have reached the latest data.
+    """
+    ph = "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
+
+    conditions: list[str] = []
+    params: list[Any] = []
+
+    if cursor:
+        cursor_id = _decode_cursor(cursor)
+        conditions.append(f"id > {ph}")
+        params.append(cursor_id)
+    elif after_ledger is not None:
+        conditions.append(f"ledger_index > {ph}")
+        params.append(after_ledger)
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT id, ledger_index, transaction_hash, transaction_type, "
+            f"account, destination, fee, source_tag, destination_tag, created_at, transaction_data "
+            f"FROM transactions {where} "
+            f"ORDER BY ledger_index ASC, id ASC "
+            f"LIMIT {ph}",
+            params + [limit],
+        )
+        rows = rows_to_list(cur.fetchall())
+
+    data = [_extract_tx_fields(r, include_full) for r in rows]
+    has_more = len(rows) == limit
+    next_cursor = _encode_cursor(rows[-1]["id"]) if has_more and rows else None
+
+    return {
+        "has_more": has_more,
+        "next_cursor": next_cursor,
+        "count": len(data),
+        "data": data,
+    }
