@@ -114,8 +114,20 @@ class MockDB:
 
 
 # ---------------------------------------------------------------------------
-# Mock indexer (for wallet discovery tests)
+# Mock indexer (mirrors the real _check_wallet_discovery logic exactly)
 # ---------------------------------------------------------------------------
+
+def _has_account_root_creation(meta: dict, destination: str) -> bool:
+    """Mirrors the helper in indexer.py."""
+    for node_wrapper in meta.get("AffectedNodes", []):
+        if "CreatedNode" in node_wrapper:
+            node = node_wrapper["CreatedNode"]
+            if (node.get("LedgerEntryType") == "AccountRoot"
+                    and (node.get("NewFields") or {}).get("Account") == destination):
+                return True
+    return False
+
+
 class MockIndexer:
     """Minimal stand-in that exercises the wallet-discovery logic."""
 
@@ -133,7 +145,14 @@ class MockIndexer:
         destination = tx_data.get("Destination")
         if not destination:
             return
-        self.db.add_tracked_wallet(destination, tx_hash)
+
+        full = tx_data.get("_full_data") or {}
+        meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
+        if not isinstance(meta, dict):
+            return
+
+        if _has_account_root_creation(meta, destination):
+            self.db.add_tracked_wallet(destination, tx_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +166,38 @@ def _make_tx(affected_nodes: list, tx_json: Optional[dict] = None) -> dict:
             "meta": {"AffectedNodes": affected_nodes, "TransactionResult": "tesSUCCESS"},
             "tx_json": tx_json or {},
         }
+    }
+
+
+def _activation_tx(account: str, destination: str) -> dict:
+    """
+    Build a tx_data dict that simulates a genuine wallet-activation Payment.
+    The metadata contains a CreatedNode / AccountRoot for the destination.
+    """
+    return {
+        "TransactionType": "Payment",
+        "Account": account,
+        "Destination": destination,
+        "_full_data": {
+            "meta": {
+                "AffectedNodes": [
+                    {
+                        "CreatedNode": {
+                            "LedgerEntryType": "AccountRoot",
+                            "NewFields": {
+                                "Account": destination,
+                                "Balance": "10000000",
+                                "Sequence": 1,
+                                "OwnerCount": 0,
+                                "Flags": 0,
+                            },
+                        }
+                    }
+                ],
+                "TransactionResult": "tesSUCCESS",
+            },
+            "tx_json": {},
+        },
     }
 
 
@@ -183,51 +234,98 @@ def _ripple_state_fields(
 # ---------------------------------------------------------------------------
 
 class TestWalletDiscovery:
-    def test_payment_from_central_adds_destination(self):
+    def test_payment_with_accountroot_adds_destination(self):
+        """A genuine activation (AccountRoot CreatedNode present) registers the wallet."""
         db = MockDB()
         idx = MockIndexer(db)
-        idx._check_wallet_discovery(
-            {"TransactionType": "Payment", "Account": CENTRAL, "Destination": USER_A},
-            "TXHASH001",
-        )
+        tx = _activation_tx(CENTRAL, USER_A)
+        idx._check_wallet_discovery(tx, "TXHASH001")
         assert USER_A in db._tracked
-        assert ("USER_A" not in db._tracked)  # exact match only
         assert db.added_wallets == [(USER_A, "TXHASH001")]
+
+    def test_payment_without_accountroot_not_added(self):
+        """A Payment from the central wallet that does NOT create a new account is ignored."""
+        db = MockDB()
+        idx = MockIndexer(db)
+        # Payment but no AccountRoot CreatedNode (sending to existing account)
+        tx = {
+            "TransactionType": "Payment",
+            "Account": CENTRAL,
+            "Destination": USER_A,
+            "_full_data": {
+                "meta": {
+                    "AffectedNodes": [
+                        _modified("AccountRoot",
+                                  final_fields={"Account": USER_A, "Balance": "20000000",
+                                                "Sequence": 5, "OwnerCount": 0, "Flags": 0})
+                    ]
+                },
+                "tx_json": {},
+            },
+        }
+        idx._check_wallet_discovery(tx, "TXHASH002")
+        assert USER_A not in db._tracked
 
     def test_non_payment_is_ignored(self):
         db = MockDB()
         idx = MockIndexer(db)
-        idx._check_wallet_discovery(
-            {"TransactionType": "OfferCreate", "Account": CENTRAL, "Destination": USER_A},
-            "TXHASH002",
-        )
+        tx = {
+            "TransactionType": "OfferCreate",
+            "Account": CENTRAL,
+            "Destination": USER_A,
+            "_full_data": {"meta": {"AffectedNodes": []}, "tx_json": {}},
+        }
+        idx._check_wallet_discovery(tx, "TXHASH003")
         assert USER_A not in db._tracked
 
     def test_payment_from_non_central_ignored(self):
         db = MockDB()
         idx = MockIndexer(db)
-        idx._check_wallet_discovery(
-            {"TransactionType": "Payment", "Account": USER_B, "Destination": USER_A},
-            "TXHASH003",
-        )
+        tx = _activation_tx(USER_B, USER_A)   # activation, but wrong sender
+        idx._check_wallet_discovery(tx, "TXHASH004")
         assert USER_A not in db._tracked
 
-    def test_duplicate_payment_does_not_re_add(self):
+    def test_duplicate_activation_does_not_re_add(self):
         db = MockDB(tracked={USER_A})
         idx = MockIndexer(db)
-        idx._check_wallet_discovery(
-            {"TransactionType": "Payment", "Account": CENTRAL, "Destination": USER_A},
-            "TXHASH004",
-        )
-        assert db.added_wallets == []  # add_tracked_wallet returned False → not recorded
+        tx = _activation_tx(CENTRAL, USER_A)
+        idx._check_wallet_discovery(tx, "TXHASH005")
+        assert db.added_wallets == []  # add_tracked_wallet returned False
 
     def test_empty_central_wallet_disables_discovery(self):
         db = MockDB()
         idx = MockIndexer(db, central_wallet="")
-        idx._check_wallet_discovery(
-            {"TransactionType": "Payment", "Account": "", "Destination": USER_A},
-            "TXHASH005",
-        )
+        tx = _activation_tx("", USER_A)
+        idx._check_wallet_discovery(tx, "TXHASH006")
+        assert USER_A not in db._tracked
+
+    def test_accountroot_for_different_address_is_ignored(self):
+        """AccountRoot CreatedNode present but for a different address (not the destination)."""
+        db = MockDB()
+        idx = MockIndexer(db)
+        tx = {
+            "TransactionType": "Payment",
+            "Account": CENTRAL,
+            "Destination": USER_A,
+            "_full_data": {
+                "meta": {
+                    "AffectedNodes": [
+                        {
+                            "CreatedNode": {
+                                "LedgerEntryType": "AccountRoot",
+                                "NewFields": {
+                                    "Account": USER_B,  # different address!
+                                    "Balance": "10000000",
+                                    "Sequence": 1,
+                                },
+                            }
+                        }
+                    ]
+                },
+                "tx_json": {},
+            },
+        }
+        idx._check_wallet_discovery(tx, "TXHASH007")
         assert USER_A not in db._tracked
 
 
@@ -270,13 +368,11 @@ class TestAccountRoot:
     def test_balance_increase(self):
         db = MockDB(tracked={USER_A})
         sp = StateProcessor(db)
-        # First set initial state
         sp.process_transaction(_make_tx([
             _modified("AccountRoot",
                 final_fields={"Account": USER_A, "Balance": "9000000", "Sequence": 2, "OwnerCount": 0, "Flags": 0},
             )
         ]), ledger_index=1001)
-        # Now increase
         sp.process_transaction(_make_tx([
             _modified("AccountRoot",
                 final_fields={"Account": USER_A, "Balance": "15000000", "Sequence": 2, "OwnerCount": 0, "Flags": 0},
@@ -323,7 +419,6 @@ class TestAccountRoot:
 
 class TestRippleState:
     # USER_A = low account, GATEWAY = high account in all fixtures
-    # (arbitrary for testing; what matters is the flag parsing)
 
     def test_trustline_create(self):
         db = MockDB(tracked={USER_A})
@@ -517,7 +612,8 @@ class TestRippleState:
 
 class TestOffer:
     def _xrp_iou_offer(self, account: str, sequence: int, xrp_drops: str = "1000000",
-                       iou_value: str = "10.0", currency: str = "USD", expiration: Optional[int] = None) -> dict:
+                       iou_value: str = "10.0", currency: str = "USD",
+                       expiration: Optional[int] = None) -> dict:
         fields: dict = {
             "Account": account,
             "Sequence": sequence,
@@ -599,7 +695,6 @@ class TestOffer:
             _make_tx([_created("Offer", self._xrp_iou_offer(USER_A, 45))]),
             ledger_index=3005,
         )
-        # OfferDelete tx produces a DeletedNode
         sp.process_transaction(
             _make_tx([_deleted("Offer", {"Account": USER_A, "Sequence": 45,
                                           "TakerGets": "1000000",
@@ -615,8 +710,7 @@ class TestOffer:
         db = MockDB(tracked={USER_A})
         sp = StateProcessor(db)
         # Ripple epoch 0 = 2000-01-01T00:00:00+00:00
-        ripple_ts = 0
-        tx = _make_tx([_created("Offer", self._xrp_iou_offer(USER_A, 46, expiration=ripple_ts))])
+        tx = _make_tx([_created("Offer", self._xrp_iou_offer(USER_A, 46, expiration=0))])
         sp.process_transaction(tx, ledger_index=3007)
         iso = db.offers[(USER_A, 46)]["expiry_iso"]
         assert iso is not None
@@ -629,7 +723,6 @@ class TestOffer:
         """Known Ripple epoch value maps to expected Unix time."""
         db = MockDB(tracked={USER_A})
         sp = StateProcessor(db)
-        # 1 Ripple second = 1 Unix second above the offset
         ripple_ts = 100
         tx = _make_tx([_created("Offer", self._xrp_iou_offer(USER_A, 47, expiration=ripple_ts))])
         sp.process_transaction(tx, ledger_index=3008)
@@ -694,7 +787,7 @@ class TestMixed:
         """A tx without _full_data should not raise."""
         db = MockDB(tracked={USER_A})
         sp = StateProcessor(db)
-        sp.process_transaction({}, ledger_index=4002)  # no exception
+        sp.process_transaction({}, ledger_index=4002)
         assert not db.account_states
 
     def test_empty_affected_nodes(self):

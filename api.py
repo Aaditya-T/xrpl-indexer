@@ -534,39 +534,57 @@ def trades(
 
 @app.get("/ledgers/resolve")
 def resolve_ledger(
-    timestamp: str = Query(..., description="ISO-8601 timestamp or YYYY-MM-DD HH:MM:SS"),
+    timestamp: str = Query(..., description="ISO-8601 timestamp, e.g. 2024-01-15T12:00:00Z"),
 ):
     """
-    Return the ledger_index closest to the given timestamp.
-    Uses created_at as a proxy for ledger close time.
+    Return the ledger_index whose close_time_iso is closest to the given timestamp.
+    Uses the close_time_iso stored in each transaction's metadata.
     """
-    ph = _ph()
     is_pg = Config.DATABASE_TYPE == "postgresql"
+    ph = _ph()
 
     with get_cursor() as cur:
         if is_pg:
             cur.execute(
-                f"SELECT ledger_index, created_at "
-                f"FROM transactions "
-                f"ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - {ph}::timestamp))) "
-                f"LIMIT 1",
+                "SELECT ledger_index, "
+                "transaction_data->'_full_data'->>'close_time_iso' AS close_time_iso "
+                "FROM transactions "
+                "WHERE transaction_data->'_full_data'->>'close_time_iso' IS NOT NULL "
+                f"ORDER BY ABS(EXTRACT(EPOCH FROM ("
+                f"  (transaction_data->'_full_data'->>'close_time_iso')::timestamptz"
+                f"  - {ph}::timestamptz"
+                f"))) "
+                "LIMIT 1",
                 (timestamp,),
             )
         else:
             cur.execute(
-                "SELECT ledger_index, created_at "
+                "SELECT ledger_index, "
+                "json_extract(transaction_data, '$._full_data.close_time_iso') AS close_time_iso "
                 "FROM transactions "
-                "ORDER BY ABS(strftime('%s', created_at) - strftime('%s', ?)) "
+                "WHERE json_extract(transaction_data, '$._full_data.close_time_iso') IS NOT NULL "
+                "ORDER BY ABS("
+                "  strftime('%s', json_extract(transaction_data, '$._full_data.close_time_iso'))"
+                "  - strftime('%s', ?)"
+                ") "
                 "LIMIT 1",
                 (timestamp,),
             )
         row = cur.fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="No transactions in database yet")
+        raise HTTPException(
+            status_code=404,
+            detail="No transactions with close_time_iso found. "
+                   "Ensure include_full data is stored by the indexer.",
+        )
 
     r = row_to_dict(row)
-    return {"timestamp": timestamp, "ledger_index": r.get("ledger_index"), "nearest_created_at": str(r.get("created_at"))}
+    return {
+        "timestamp": timestamp,
+        "ledger_index": r.get("ledger_index"),
+        "close_time_iso": r.get("close_time_iso"),
+    }
 
 
 # ---------------------------------------------------------------------------

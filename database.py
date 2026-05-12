@@ -283,28 +283,39 @@ class Database:
         """Return all tracked wallet addresses."""
         return list(self._tracked_wallets_cache)
 
-    def get_central_wallet_payment_destinations(self, central_wallet: str) -> list[dict]:
-        """Fetch all Payment destinations from the central wallet stored in transactions."""
+    def get_central_wallet_payments_for_discovery(self, central_wallet: str) -> list[dict]:
+        """
+        Fetch Payment transactions from the central wallet, in ledger order.
+        Returns address, tx_hash, and transaction_data so callers can inspect
+        AffectedNodes for AccountRoot creation (the definitive activation signal).
+        """
         cursor = self.conn.cursor()
         if self.db_type == "postgresql":
             cursor.execute(
-                "SELECT DISTINCT destination, transaction_hash "
+                "SELECT DISTINCT ON (destination) destination, transaction_hash, transaction_data "
                 "FROM transactions "
-                "WHERE account = %s AND transaction_type = 'Payment' AND destination IS NOT NULL",
+                "WHERE account = %s AND transaction_type = 'Payment' AND destination IS NOT NULL "
+                "ORDER BY destination, ledger_index ASC",
                 (central_wallet,),
             )
         else:
+            # SQLite: GROUP BY picks an arbitrary row per destination; we want the earliest
             cursor.execute(
-                "SELECT DISTINCT destination, transaction_hash "
+                "SELECT destination, transaction_hash, transaction_data "
                 "FROM transactions "
-                "WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL",
+                "WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL "
+                "GROUP BY destination "
+                "ORDER BY MIN(ledger_index) ASC",
                 (central_wallet,),
             )
         rows = cursor.fetchall()
         cursor.close()
         if self.db_type == "postgresql":
-            return [{"address": r["destination"], "tx_hash": r["transaction_hash"]} for r in rows]
-        return [{"address": r[0], "tx_hash": r[1]} for r in rows]
+            return [
+                {"address": r["destination"], "tx_hash": r["transaction_hash"], "transaction_data": r["transaction_data"]}
+                for r in rows
+            ]
+        return [{"address": r[0], "tx_hash": r[1], "transaction_data": r[2]} for r in rows]
 
     # ------------------------------------------------------------------
     # Account states
@@ -389,7 +400,6 @@ class Database:
         """Upsert a trustline row, only updating if ledger_index is newer."""
         cursor = self.conn.cursor()
         try:
-            a, p_a = (1, 1) if authorized else (0, 0)  # dummy init overwritten below
             a = int(authorized)
             p_a = int(peer_authorized)
             nr = int(no_ripple)

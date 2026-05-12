@@ -1,4 +1,5 @@
 """XRPL Indexer: fetches ledger transactions and maintains state tables."""
+import json
 from typing import Optional
 from database import Database
 from xrpl_client import XRPLClient
@@ -6,6 +7,21 @@ from state_processor import StateProcessor
 from config import Config
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def _has_account_root_creation(meta: dict, destination: str) -> bool:
+    """
+    Return True if the transaction metadata contains a CreatedNode for an
+    AccountRoot whose Account field matches `destination`.  This is the
+    definitive signal that the account was newly funded/activated by this tx.
+    """
+    for node_wrapper in meta.get("AffectedNodes", []):
+        if "CreatedNode" in node_wrapper:
+            node = node_wrapper["CreatedNode"]
+            if (node.get("LedgerEntryType") == "AccountRoot"
+                    and (node.get("NewFields") or {}).get("Account") == destination):
+                return True
+    return False
 
 
 class XRPLIndexer:
@@ -20,33 +36,51 @@ class XRPLIndexer:
         self.filter_source_tags = Config.get_filter_source_tags()
         self.central_wallet = Config.CENTRAL_WALLET_ADDRESS.strip()
 
-        # Retroactively discover wallets activated before this run
+        # Retroactively discover wallets activated before this run started
         if self.central_wallet:
             self._retroactive_wallet_scan()
 
     # ------------------------------------------------------------------
-    # Wallet discovery
+    # Wallet discovery helpers
     # ------------------------------------------------------------------
 
     def _retroactive_wallet_scan(self):
         """
-        Scan transactions already in the DB for Payments from the central
-        wallet and register any untracked destinations so state tracking
-        begins for them on the next indexing cycle.
+        Scan already-stored Payment transactions from the central wallet.
+        For each one, check whether the metadata shows an AccountRoot was
+        created for the destination (i.e. the account was genuinely activated).
+        Only those destinations are added to tracked_wallets.
         """
-        rows = self.db.get_central_wallet_payment_destinations(self.central_wallet)
+        rows = self.db.get_central_wallet_payments_for_discovery(self.central_wallet)
         newly_added = 0
         for row in rows:
-            added = self.db.add_tracked_wallet(row["address"], row["tx_hash"])
-            if added:
-                newly_added += 1
+            destination = row["address"]
+            tx_hash = row["tx_hash"]
+            raw = row.get("transaction_data") or {}
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (ValueError, TypeError):
+                    raw = {}
+
+            full = raw.get("_full_data") if isinstance(raw, dict) else {}
+            meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
+            if not isinstance(meta, dict):
+                continue
+
+            if _has_account_root_creation(meta, destination):
+                added = self.db.add_tracked_wallet(destination, tx_hash)
+                if added:
+                    newly_added += 1
+
         if newly_added:
             print(f"[WalletDiscovery] Retroactively registered {newly_added} wallet(s) from stored transactions.")
 
     def _check_wallet_discovery(self, tx_data: dict, tx_hash: str):
         """
-        If this transaction is a Payment from the central wallet to a new
-        address, register that address as a tracked wallet.
+        If this transaction is a Payment from the central wallet that
+        demonstrably activated a new account (AccountRoot CreatedNode in meta),
+        register that destination as a tracked wallet.
         """
         if not self.central_wallet:
             return
@@ -57,16 +91,24 @@ class XRPLIndexer:
         destination = tx_data.get("Destination")
         if not destination:
             return
-        added = self.db.add_tracked_wallet(destination, tx_hash)
-        if added:
-            print(f"[WalletDiscovery] New wallet activated: {destination} (tx: {tx_hash})")
+
+        # _full_data is set before this method is called in process_ledger
+        full = tx_data.get("_full_data") or {}
+        meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
+        if not isinstance(meta, dict):
+            return
+
+        if _has_account_root_creation(meta, destination):
+            added = self.db.add_tracked_wallet(destination, tx_hash)
+            if added:
+                print(f"[WalletDiscovery] New wallet activated: {destination} (tx: {tx_hash})")
 
     # ------------------------------------------------------------------
-    # Filtering
+    # Filtering (transactions table only)
     # ------------------------------------------------------------------
 
     def should_include_transaction(self, tx_data: dict) -> bool:
-        """Return True if the transaction passes all configured filters."""
+        """Return True if transaction should be stored in the transactions table."""
         if self.filter_tx_types:
             if tx_data.get("TransactionType") not in self.filter_tx_types:
                 return False
@@ -88,7 +130,15 @@ class XRPLIndexer:
     # ------------------------------------------------------------------
 
     def process_ledger(self, ledger_index: int) -> int:
-        """Process a single ledger; return number of transactions stored."""
+        """
+        Fetch and process a single ledger.
+
+        State tracking (wallet discovery + account/trustline/offer tables) runs
+        on EVERY transaction regardless of the configured filters.  The filters
+        only control what gets written to the `transactions` table.
+
+        Returns the number of transactions stored in the transactions table.
+        """
         print(f"Processing ledger {ledger_index}...")
         transactions = self.xrpl_client.get_ledger_with_transactions(ledger_index)
         stored_count = 0
@@ -110,22 +160,25 @@ class XRPLIndexer:
                 if "ledger_index" not in tx_data:
                     tx_data["ledger_index"] = ledger_index
 
+            # Attach full raw response early; needed by discovery and state processor
+            tx_data["_full_data"] = tx
             tx_hash = tx_data.get("hash", "")
 
-            # Wallet discovery runs on every transaction regardless of filters,
-            # so we never miss a central-wallet activation.
+            # --- State tracking: runs on ALL transactions, filter-independent ---
+
+            # 1. Wallet discovery (requires AccountRoot CreatedNode in meta)
             self._check_wallet_discovery(tx_data, tx_hash)
 
+            # 2. Update account_states / trustlines / offers from AffectedNodes
+            try:
+                self.state_processor.process_transaction(tx_data, ledger_index)
+            except Exception as exc:
+                print(f"[StateProcessor] error on tx {tx_hash}: {exc}")
+
+            # --- Transaction storage: controlled by configured filters ---
             if self.should_include_transaction(tx_data):
-                tx_data["_full_data"] = tx
                 self.db.insert_transaction(tx_data)
                 stored_count += 1
-
-                # Update live state tables from this transaction's metadata
-                try:
-                    self.state_processor.process_transaction(tx_data, ledger_index)
-                except Exception as exc:
-                    print(f"[StateProcessor] error on tx {tx_hash}: {exc}")
 
         print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count}")
         return stored_count
