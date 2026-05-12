@@ -27,14 +27,21 @@ def _has_account_root_creation(meta: dict, destination: str) -> bool:
 class XRPLIndexer:
     """Main indexer class for processing XRPL ledgers and transactions"""
 
-    def __init__(self):
-        self.db = Database()
-        self.xrpl_client = XRPLClient()
+    def __init__(
+        self,
+        db: Optional["Database"] = None,
+        xrpl_client: Optional["XRPLClient"] = None,
+        central_wallet: Optional[str] = None,
+    ):
+        self.db = db if db is not None else Database()
+        self.xrpl_client = xrpl_client if xrpl_client is not None else XRPLClient()
         self.state_processor = StateProcessor(self.db)
         self.filter_tx_types = Config.get_filter_transaction_types()
         self.filter_addresses = Config.get_filter_addresses()
         self.filter_source_tags = Config.get_filter_source_tags()
-        self.central_wallet = Config.CENTRAL_WALLET_ADDRESS.strip()
+        self.central_wallet = (
+            central_wallet if central_wallet is not None else Config.CENTRAL_WALLET_ADDRESS
+        ).strip()
 
         # Retroactively discover wallets activated before this run started
         if self.central_wallet:

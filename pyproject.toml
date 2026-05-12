@@ -16,3 +16,9 @@ dependencies = [
 dev = [
     "pytest>=9.0.3",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: end-to-end tests that hit the XRPL testnet (deselect with -m 'not integration')",
+]

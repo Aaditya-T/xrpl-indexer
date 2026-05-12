@@ -11,8 +11,13 @@ from config import Config
 class Database:
     """Database handler supporting both PostgreSQL and SQLite"""
 
-    def __init__(self):
-        self.db_type = Config.DATABASE_TYPE
+    def __init__(
+        self,
+        db_url: Optional[str] = None,
+        db_type: Optional[str] = None,
+    ):
+        self.db_type = db_type or Config.DATABASE_TYPE
+        self._db_url = db_url or Config.DATABASE_URL
         self.conn: Union[psycopg2.extensions.connection, sqlite3.Connection]
         self._tracked_wallets_cache: set[str] = set()
         self.connect()
@@ -22,9 +27,9 @@ class Database:
     def connect(self):
         """Establish database connection"""
         if self.db_type == "postgresql":
-            self.conn = psycopg2.connect(Config.DATABASE_URL, cursor_factory=RealDictCursor)
+            self.conn = psycopg2.connect(self._db_url, cursor_factory=RealDictCursor)
         else:
-            db_path = Config.DATABASE_URL.replace("sqlite:///", "")
+            db_path = self._db_url.replace("sqlite:///", "")
             self.conn = sqlite3.connect(db_path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
 
