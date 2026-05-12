@@ -107,6 +107,10 @@ class MockDB:
             "ledger_index": ledger_index,
         }
 
+    def delete_trustline(self, account: str, issuer: str, currency: str):
+        key = (account, issuer, currency)
+        self.trustlines.pop(key, None)
+
     def delete_offer(self, account: str, sequence: int):
         key = (account, sequence)
         self.offers.pop(key, None)
@@ -569,7 +573,7 @@ class TestRippleState:
                 balance="0", high_limit="0", low_limit="1000",
             ))
         ]), ledger_index=2010)
-        assert db.trustlines[(USER_A, GATEWAY, "USD")]["is_deleted"] is False
+        assert (USER_A, GATEWAY, "USD") in db.trustlines
 
         sp.process_transaction(_make_tx([
             _deleted("RippleState", _ripple_state_fields(
@@ -577,7 +581,7 @@ class TestRippleState:
                 balance="0", high_limit="0", low_limit="0",
             ))
         ]), ledger_index=2011)
-        assert db.trustlines[(USER_A, GATEWAY, "USD")]["is_deleted"] is True
+        assert (USER_A, GATEWAY, "USD") not in db.trustlines
 
     def test_both_parties_tracked_both_get_row(self):
         db = MockDB(tracked={USER_A, USER_B})

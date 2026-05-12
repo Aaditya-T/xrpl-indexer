@@ -260,10 +260,7 @@ def account_balances(
 ):
     """
     Current trust-line balances for a tracked account.
-
-    Trust lines are soft-deleted (is_deleted=true) when a DeletedNode / RippleState
-    appears in transaction metadata; the row remains in the table so historical
-    queries still work.  This endpoint excludes deleted rows by default.
+    Excludes trust lines that have been removed (DeletedNode in metadata).
     """
     ph = _ph()
     with get_cursor() as cur:
@@ -554,8 +551,8 @@ def trades(
         # Filter by issuer/currency if requested
         for fill in fills:
             if issuer or currency:
-                tg = fill["taker_gets"]
-                tp = fill["taker_pays"]
+                tg = fill.get("filled_taker_gets") or {}
+                tp = fill.get("filled_taker_pays") or {}
                 match = (
                     (not issuer or tg.get("issuer") == issuer or tp.get("issuer") == issuer)
                     and (not currency or tg.get("currency") == currency or tp.get("currency") == currency)

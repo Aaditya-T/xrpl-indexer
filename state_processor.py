@@ -189,22 +189,25 @@ class StateProcessor:
                 freeze          = bool(flags & _LSF_LOW_FREEZE)
                 peer_freeze     = bool(flags & _LSF_HIGH_FREEZE)
 
-            self.db.upsert_trustline(
-                account=account,
-                issuer=peer,
-                currency=currency,
-                balance=acc_balance,
-                limit_amount=limit_amount,
-                limit_peer=limit_peer,
-                authorized=authorized,
-                peer_authorized=peer_authorized,
-                no_ripple=no_ripple,
-                no_ripple_peer=no_ripple_peer,
-                freeze=freeze,
-                peer_freeze=peer_freeze,
-                is_deleted=deleted,
-                ledger_index=ledger_index,
-            )
+            if deleted:
+                self.db.delete_trustline(account, peer, currency)
+            else:
+                self.db.upsert_trustline(
+                    account=account,
+                    issuer=peer,
+                    currency=currency,
+                    balance=acc_balance,
+                    limit_amount=limit_amount,
+                    limit_peer=limit_peer,
+                    authorized=authorized,
+                    peer_authorized=peer_authorized,
+                    no_ripple=no_ripple,
+                    no_ripple_peer=no_ripple_peer,
+                    freeze=freeze,
+                    peer_freeze=peer_freeze,
+                    is_deleted=False,
+                    ledger_index=ledger_index,
+                )
 
     # ------------------------------------------------------------------
     # Offer → offers

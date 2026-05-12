@@ -477,6 +477,27 @@ class Database:
         finally:
             cursor.close()
 
+    def delete_trustline(self, account: str, issuer: str, currency: str) -> None:
+        """Hard-delete a trust line row when the ledger removes it."""
+        cursor = self.conn.cursor()
+        try:
+            if self.db_type == "postgresql":
+                cursor.execute(
+                    "DELETE FROM trustlines WHERE account = %s AND issuer = %s AND currency = %s",
+                    (account, issuer, currency),
+                )
+            else:
+                cursor.execute(
+                    "DELETE FROM trustlines WHERE account = ? AND issuer = ? AND currency = ?",
+                    (account, issuer, currency),
+                )
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error deleting trustline {account}/{issuer}/{currency}: {e}")
+            self.conn.rollback()
+        finally:
+            cursor.close()
+
     # ------------------------------------------------------------------
     # Offers
     # ------------------------------------------------------------------
