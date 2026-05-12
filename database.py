@@ -299,14 +299,21 @@ class Database:
                 (central_wallet,),
             )
         else:
-            # SQLite: GROUP BY picks an arbitrary row per destination; we want the earliest
+            # SQLite: use a CTE to deterministically select the earliest tx per destination.
+            # A bare GROUP BY would pick an arbitrary row for transaction_hash / transaction_data.
             cursor.execute(
-                "SELECT destination, transaction_hash, transaction_data "
-                "FROM transactions "
-                "WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL "
-                "GROUP BY destination "
-                "ORDER BY MIN(ledger_index) ASC",
-                (central_wallet,),
+                "WITH earliest AS ("
+                "  SELECT destination, MIN(ledger_index) AS min_li"
+                "  FROM transactions"
+                "  WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL"
+                "  GROUP BY destination"
+                ")"
+                "SELECT t.destination, t.transaction_hash, t.transaction_data"
+                " FROM transactions t"
+                " JOIN earliest ON t.destination = earliest.destination"
+                "              AND t.ledger_index = earliest.min_li"
+                " WHERE t.account = ? AND t.transaction_type = 'Payment'",
+                (central_wallet, central_wallet),
             )
         rows = cursor.fetchall()
         cursor.close()

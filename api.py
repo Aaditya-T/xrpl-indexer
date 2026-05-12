@@ -260,7 +260,10 @@ def account_balances(
 ):
     """
     Current trust-line balances for a tracked account.
-    Excludes deleted trust lines unless include_zero is set.
+
+    Trust lines are soft-deleted (is_deleted=true) when a DeletedNode / RippleState
+    appears in transaction metadata; the row remains in the table so historical
+    queries still work.  This endpoint excludes deleted rows by default.
     """
     ph = _ph()
     with get_cursor() as cur:
@@ -393,8 +396,46 @@ def orderbook(
 # Trades (fill extraction from stored meta)
 # ---------------------------------------------------------------------------
 
+def _amount_to_info(amt: Any) -> Optional[dict]:
+    """Normalise an XRPL amount (XRP string or IOU dict) to a plain dict."""
+    if amt is None:
+        return None
+    if isinstance(amt, str):
+        return {"currency": "XRP", "issuer": None, "value": amt}
+    return {"currency": amt.get("currency"), "issuer": amt.get("issuer"), "value": amt.get("value")}
+
+
+def _subtract_amounts(prev: Any, final: Any) -> Any:
+    """
+    Compute the actual fill size: prev_amount - final_amount.
+    Works for both XRP drop strings and IOU dicts.
+    """
+    if isinstance(prev, str) and isinstance(final, str):
+        try:
+            return str(int(prev) - int(final))
+        except (ValueError, TypeError):
+            return "0"
+    if isinstance(prev, dict) and isinstance(final, dict):
+        try:
+            delta = float(prev.get("value", 0)) - float(final.get("value", 0))
+        except (ValueError, TypeError):
+            delta = 0.0
+        return {
+            "currency": prev.get("currency") or final.get("currency"),
+            "issuer": prev.get("issuer") or final.get("issuer"),
+            "value": str(delta),
+        }
+    return None
+
+
 def _extract_fills(tx_data_raw: Any, tx_hash: str, ledger_index: int, close_time_iso: Optional[str]) -> list[dict]:
-    """Parse trade fills from a transaction's AffectedNodes."""
+    """
+    Parse trade fills from a transaction's AffectedNodes.
+
+    Fill sizes are reported as actual traded deltas:
+    - DeletedNode (full fill): FinalFields amounts are what was wholly consumed.
+    - ModifiedNode (partial fill): PreviousFields − FinalFields = the traded portion.
+    """
     if isinstance(tx_data_raw, str):
         try:
             tx_data_raw = json.loads(tx_data_raw)
@@ -409,52 +450,52 @@ def _extract_fills(tx_data_raw: Any, tx_hash: str, ledger_index: int, close_time
     if not isinstance(tx_json, dict):
         tx_json = {}
 
-    maker_account = tx_json.get("Account")
+    taker_account = tx_json.get("Account")
     fills: list[dict] = []
 
     for node_wrapper in meta.get("AffectedNodes", []):
-        entry: Optional[dict] = None
+        offer_account: Optional[str] = None
+        filled_gets: Any = None
+        filled_pays: Any = None
         is_deleted = False
 
         if "DeletedNode" in node_wrapper:
             node = node_wrapper["DeletedNode"]
-            if node.get("LedgerEntryType") == "Offer":
-                entry = node.get("FinalFields") or {}
-                is_deleted = True
+            if node.get("LedgerEntryType") != "Offer":
+                continue
+            fields = node.get("FinalFields") or {}
+            offer_account = fields.get("Account")
+            # Full fill: the entire remaining amount was consumed
+            filled_gets = fields.get("TakerGets")
+            filled_pays = fields.get("TakerPays")
+            is_deleted = True
+
         elif "ModifiedNode" in node_wrapper:
             node = node_wrapper["ModifiedNode"]
-            if node.get("LedgerEntryType") == "Offer":
-                prev = node.get("PreviousFields") or {}
-                final = node.get("FinalFields") or {}
-                # Only include if TakerGets/TakerPays actually changed
-                if "TakerGets" in prev or "TakerPays" in prev:
-                    entry = final
-
-        if not entry:
+            if node.get("LedgerEntryType") != "Offer":
+                continue
+            prev  = node.get("PreviousFields") or {}
+            final = node.get("FinalFields")    or {}
+            # Only include if amounts actually changed (amounts are in PreviousFields)
+            if "TakerGets" not in prev and "TakerPays" not in prev:
+                continue
+            offer_account = final.get("Account")
+            # Partial fill: delta = what was there before minus what remains
+            if "TakerGets" in prev:
+                filled_gets = _subtract_amounts(prev["TakerGets"], final.get("TakerGets", prev["TakerGets"]))
+            if "TakerPays" in prev:
+                filled_pays = _subtract_amounts(prev["TakerPays"], final.get("TakerPays", prev["TakerPays"]))
+        else:
             continue
-
-        offer_account = entry.get("Account")
-        tg = entry.get("TakerGets") or {}
-        tp = entry.get("TakerPays") or {}
-
-        if isinstance(tg, str):
-            tg_info = {"currency": "XRP", "issuer": None, "value": tg}
-        else:
-            tg_info = {"currency": tg.get("currency"), "issuer": tg.get("issuer"), "value": tg.get("value")}
-
-        if isinstance(tp, str):
-            tp_info = {"currency": "XRP", "issuer": None, "value": tp}
-        else:
-            tp_info = {"currency": tp.get("currency"), "issuer": tp.get("issuer"), "value": tp.get("value")}
 
         fills.append({
             "tx_hash": tx_hash,
             "ledger_index": ledger_index,
             "close_time_iso": close_time_iso,
             "maker_account": offer_account,
-            "taker_account": maker_account,
-            "taker_gets": tg_info,
-            "taker_pays": tp_info,
+            "taker_account": taker_account,
+            "filled_taker_gets": _amount_to_info(filled_gets),
+            "filled_taker_pays": _amount_to_info(filled_pays),
             "fully_consumed": is_deleted,
         })
 
