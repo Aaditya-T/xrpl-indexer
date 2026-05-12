@@ -11,3 +11,8 @@ dependencies = [
     "uvicorn>=0.42.0",
     "xrpl-py>=4.3.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

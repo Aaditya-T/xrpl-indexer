@@ -41,6 +41,9 @@ class Config:
     FILTER_ADDRESSES = os.getenv("FILTER_ADDRESSES", "")
     FILTER_SOURCE_TAGS = os.getenv("FILTER_SOURCE_TAGS", "")
 
+    # Hub-and-spoke wallet tracking: address of the central wallet that funds user wallets
+    CENTRAL_WALLET_ADDRESS = os.getenv("CENTRAL_WALLET_ADDRESS", "")
+
     @staticmethod
     def get_filter_transaction_types():
         """Returns list of transaction types to filter, or empty list for all"""

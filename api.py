@@ -46,7 +46,6 @@ def get_cursor() -> Generator[Any, None, None]:
 
 
 def row_to_dict(row: Any) -> dict:
-    """Convert a database row to a plain dict."""
     if row is None:
         return {}
     if isinstance(row, dict):
@@ -56,6 +55,10 @@ def row_to_dict(row: Any) -> dict:
 
 def rows_to_list(rows: list) -> list[dict]:
     return [row_to_dict(r) for r in rows]
+
+
+def _ph() -> str:
+    return "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
 
 
 # ---------------------------------------------------------------------------
@@ -75,16 +78,19 @@ def health():
 
 @app.get("/status")
 def status():
-    """Return the last processed ledger index."""
+    """Return the last processed ledger index and tracked wallet count."""
     with get_cursor() as cur:
         cur.execute(
             "SELECT last_processed_ledger_index, updated_at "
             "FROM indexer_state ORDER BY id DESC LIMIT 1"
         )
-        row = cur.fetchone()
-    if not row:
-        return {"last_processed_ledger_index": None, "updated_at": None}
-    return row_to_dict(row)
+        state_row = cur.fetchone()
+        cur.execute("SELECT COUNT(*) as count FROM tracked_wallets")
+        tw_row = cur.fetchone()
+
+    result = row_to_dict(state_row) if state_row else {"last_processed_ledger_index": None, "updated_at": None}
+    result["tracked_wallets"] = row_to_dict(tw_row).get("count", 0) if tw_row else 0
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -93,55 +99,41 @@ def status():
 
 @app.get("/transactions")
 def list_transactions(
-    page: int = Query(default=1, ge=1, description="Page number"),
-    limit: int = Query(default=50, ge=1, le=500, description="Results per page"),
-    transaction_type: Optional[str] = Query(default=None, description="Filter by transaction type, e.g. Payment"),
-    account: Optional[str] = Query(default=None, description="Filter by source account address"),
-    destination: Optional[str] = Query(default=None, description="Filter by destination address"),
-    source_tag: Optional[int] = Query(default=None, description="Filter by source tag"),
-    destination_tag: Optional[int] = Query(default=None, description="Filter by destination tag"),
-    ledger_min: Optional[int] = Query(default=None, description="Minimum ledger index"),
-    ledger_max: Optional[int] = Query(default=None, description="Maximum ledger index"),
-    from_date: Optional[str] = Query(default=None, description="Start date (YYYY-MM-DD)"),
-    to_date: Optional[str] = Query(default=None, description="End date (YYYY-MM-DD)"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=500),
+    transaction_type: Optional[str] = Query(default=None),
+    account: Optional[str] = Query(default=None),
+    destination: Optional[str] = Query(default=None),
+    source_tag: Optional[int] = Query(default=None),
+    destination_tag: Optional[int] = Query(default=None),
+    ledger_min: Optional[int] = Query(default=None),
+    ledger_max: Optional[int] = Query(default=None),
+    from_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
+    to_date: Optional[str] = Query(default=None, description="YYYY-MM-DD"),
 ):
-    """
-    List transactions with optional filters and pagination.
-    Returns transactions ordered by ledger index descending.
-    """
-    is_pg = Config.DATABASE_TYPE == "postgresql"
-    ph = "%s" if is_pg else "?"
-
+    """List transactions with optional filters, paginated, newest first."""
+    ph = _ph()
     conditions: list[str] = []
     params: list[Any] = []
 
     if transaction_type:
-        conditions.append(f"transaction_type = {ph}")
-        params.append(transaction_type)
+        conditions.append(f"transaction_type = {ph}"); params.append(transaction_type)
     if account:
-        conditions.append(f"account = {ph}")
-        params.append(account)
+        conditions.append(f"account = {ph}"); params.append(account)
     if destination:
-        conditions.append(f"destination = {ph}")
-        params.append(destination)
+        conditions.append(f"destination = {ph}"); params.append(destination)
     if source_tag is not None:
-        conditions.append(f"source_tag = {ph}")
-        params.append(source_tag)
+        conditions.append(f"source_tag = {ph}"); params.append(source_tag)
     if destination_tag is not None:
-        conditions.append(f"destination_tag = {ph}")
-        params.append(destination_tag)
+        conditions.append(f"destination_tag = {ph}"); params.append(destination_tag)
     if ledger_min is not None:
-        conditions.append(f"ledger_index >= {ph}")
-        params.append(ledger_min)
+        conditions.append(f"ledger_index >= {ph}"); params.append(ledger_min)
     if ledger_max is not None:
-        conditions.append(f"ledger_index <= {ph}")
-        params.append(ledger_max)
+        conditions.append(f"ledger_index <= {ph}"); params.append(ledger_max)
     if from_date:
-        conditions.append(f"created_at >= {ph}")
-        params.append(from_date)
+        conditions.append(f"created_at >= {ph}"); params.append(from_date)
     if to_date:
-        conditions.append(f"created_at <= {ph}")
-        params.append(to_date + " 23:59:59")
+        conditions.append(f"created_at <= {ph}"); params.append(to_date + " 23:59:59")
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
     offset = (page - 1) * limit
@@ -149,45 +141,48 @@ def list_transactions(
     with get_cursor() as cur:
         cur.execute(f"SELECT COUNT(*) as count FROM transactions {where}", params)
         total = row_to_dict(cur.fetchone()).get("count", 0)
-
         cur.execute(
             f"SELECT id, ledger_index, transaction_hash, transaction_type, "
             f"account, destination, amount, fee, source_tag, destination_tag, created_at "
-            f"FROM transactions {where} "
-            f"ORDER BY ledger_index DESC "
-            f"LIMIT {ph} OFFSET {ph}",
+            f"FROM transactions {where} ORDER BY ledger_index DESC LIMIT {ph} OFFSET {ph}",
             params + [limit, offset],
         )
         rows = rows_to_list(cur.fetchall())
 
-    return {
-        "total": total,
-        "page": page,
-        "limit": limit,
-        "pages": max(1, -(-int(total) // limit)),
-        "data": rows,
-    }
+    return {"total": total, "page": page, "limit": limit,
+            "pages": max(1, -(-int(total) // limit)), "data": rows}
 
 
 @app.get("/transactions/{tx_hash}")
 def get_transaction(tx_hash: str):
-    """Fetch a single transaction by its hash, including full raw data."""
-    ph = "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
+    """Fetch a single transaction by hash with clean structured fields."""
+    ph = _ph()
     with get_cursor() as cur:
-        cur.execute(
-            f"SELECT * FROM transactions WHERE transaction_hash = {ph}",
-            (tx_hash,),
-        )
+        cur.execute(f"SELECT * FROM transactions WHERE transaction_hash = {ph}", (tx_hash,))
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Transaction not found")
+
     result = row_to_dict(row)
-    if isinstance(result.get("transaction_data"), str):
+    raw = result.get("transaction_data")
+    if isinstance(raw, str):
         try:
-            result["transaction_data"] = json.loads(result["transaction_data"])
+            raw = json.loads(raw)
         except (ValueError, TypeError):
-            pass
-    return result
+            raw = {}
+
+    full = raw.get("_full_data") if isinstance(raw, dict) and isinstance(raw.get("_full_data"), dict) else (raw or {})
+    meta = full.get("meta") if isinstance(full.get("meta"), dict) else None
+
+    return {
+        "status": meta.get("TransactionResult") if meta else None,
+        "ledger_index": result.get("ledger_index"),
+        "transaction_hash": result.get("transaction_hash"),
+        "transaction_type": result.get("transaction_type"),
+        "close_time_iso": full.get("close_time_iso"),
+        "tx_json": full.get("tx_json"),
+        "meta": meta,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -196,64 +191,45 @@ def get_transaction(tx_hash: str):
 
 @app.get("/stats")
 def stats():
-    """Return aggregated statistics about stored transactions."""
+    """Aggregated statistics about stored transactions."""
     with get_cursor() as cur:
         cur.execute("SELECT COUNT(*) as count FROM transactions")
         total = row_to_dict(cur.fetchone()).get("count", 0)
-
         cur.execute(
-            "SELECT transaction_type, COUNT(*) as count "
-            "FROM transactions "
-            "GROUP BY transaction_type "
-            "ORDER BY count DESC"
+            "SELECT transaction_type, COUNT(*) as count FROM transactions "
+            "GROUP BY transaction_type ORDER BY count DESC"
         )
         by_type = rows_to_list(cur.fetchall())
-
         cur.execute(
-            "SELECT DATE(created_at) as date, COUNT(*) as count "
-            "FROM transactions "
-            "GROUP BY DATE(created_at) "
-            "ORDER BY date DESC "
-            "LIMIT 30"
+            "SELECT DATE(created_at) as date, COUNT(*) as count FROM transactions "
+            "GROUP BY DATE(created_at) ORDER BY date DESC LIMIT 30"
         )
         by_day = rows_to_list(cur.fetchall())
-
-        cur.execute(
-            "SELECT MIN(ledger_index) as min_ledger, MAX(ledger_index) as max_ledger "
-            "FROM transactions"
-        )
+        cur.execute("SELECT MIN(ledger_index) as min_ledger, MAX(ledger_index) as max_ledger FROM transactions")
         ledger_range = row_to_dict(cur.fetchone())
-
-        cur.execute(
-            "SELECT last_processed_ledger_index, updated_at "
-            "FROM indexer_state ORDER BY id DESC LIMIT 1"
-        )
+        cur.execute("SELECT last_processed_ledger_index, updated_at FROM indexer_state ORDER BY id DESC LIMIT 1")
         state_row = cur.fetchone()
-        indexer_state = row_to_dict(state_row) if state_row else {}
+        cur.execute("SELECT COUNT(*) as count FROM tracked_wallets")
+        tw_row = cur.fetchone()
 
     return {
         "total_transactions": total,
         "by_transaction_type": by_type,
         "by_day": by_day,
         "ledger_range": ledger_range,
-        "indexer_state": indexer_state,
+        "indexer_state": row_to_dict(state_row) if state_row else {},
+        "tracked_wallets": row_to_dict(tw_row).get("count", 0) if tw_row else 0,
     }
 
 
 @app.get("/stats/accounts")
-def top_accounts(
-    limit: int = Query(default=20, ge=1, le=100, description="Number of top accounts to return"),
-):
-    """Return the most active source accounts."""
-    ph = "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
+def top_accounts(limit: int = Query(default=20, ge=1, le=100)):
+    """Most active source accounts."""
+    ph = _ph()
     with get_cursor() as cur:
         cur.execute(
-            f"SELECT account, COUNT(*) as count "
-            f"FROM transactions "
-            f"WHERE account IS NOT NULL "
-            f"GROUP BY account "
-            f"ORDER BY count DESC "
-            f"LIMIT {ph}",
+            f"SELECT account, COUNT(*) as count FROM transactions "
+            f"WHERE account IS NOT NULL GROUP BY account ORDER BY count DESC LIMIT {ph}",
             (limit,),
         )
         rows = rows_to_list(cur.fetchall())
@@ -261,7 +237,364 @@ def top_accounts(
 
 
 # ---------------------------------------------------------------------------
-# Sync
+# Account state endpoints (hub-and-spoke)
+# ---------------------------------------------------------------------------
+
+@app.get("/accounts/{address}/info")
+def account_info(address: str):
+    """Current account state: balance, sequence, flags."""
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(f"SELECT * FROM account_states WHERE address = {ph}", (address,))
+        row = cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found or not tracked")
+    return row_to_dict(row)
+
+
+@app.get("/accounts/{address}/balances")
+def account_balances(
+    address: str,
+    include_xrp: bool = Query(default=False, description="Include XRP balance as a row"),
+    include_zero: bool = Query(default=False, description="Include trust lines with zero balance"),
+):
+    """
+    Current trust-line balances for a tracked account.
+    Excludes deleted trust lines unless include_zero is set.
+    """
+    ph = _ph()
+    with get_cursor() as cur:
+        query = (
+            f"SELECT issuer, currency, balance, limit_amount, limit_peer, "
+            f"authorized, peer_authorized, no_ripple, no_ripple_peer, freeze, peer_freeze, is_deleted "
+            f"FROM trustlines WHERE account = {ph} AND is_deleted = FALSE"
+        )
+        params: list[Any] = [address]
+        if not include_zero:
+            query += f" AND balance != {ph} AND balance != {ph}"
+            params += ["0", "0.0"]
+        cur.execute(query, params)
+        trustlines = rows_to_list(cur.fetchall())
+
+        xrp_row = None
+        if include_xrp:
+            cur.execute(f"SELECT balance_drops FROM account_states WHERE address = {ph}", (address,))
+            r = cur.fetchone()
+            if r:
+                drops = row_to_dict(r).get("balance_drops")
+                xrp_row = {"currency": "XRP", "issuer": None, "balance": str(drops) if drops is not None else None}
+
+    result: list[dict] = []
+    if xrp_row:
+        result.append(xrp_row)
+    result.extend(trustlines)
+    return {"address": address, "balances": result}
+
+
+@app.get("/accounts/{address}/offers")
+def account_offers(address: str):
+    """All currently open offers placed by a tracked account."""
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT sequence, taker_gets_currency, taker_gets_issuer, taker_gets_value, "
+            f"taker_pays_currency, taker_pays_issuer, taker_pays_value, "
+            f"expiry_iso, flags, quality, ledger_index "
+            f"FROM offers WHERE account = {ph} ORDER BY ledger_index ASC",
+            (address,),
+        )
+        rows = rows_to_list(cur.fetchall())
+    return {"address": address, "offers": rows}
+
+
+# ---------------------------------------------------------------------------
+# Token holders
+# ---------------------------------------------------------------------------
+
+@app.get("/tokens/{issuer}/{currency}/holders")
+def token_holders(
+    issuer: str,
+    currency: str,
+    exclude_addresses: Optional[str] = Query(default=None, description="Comma-separated addresses to exclude"),
+):
+    """All tracked accounts holding a balance of issuer/currency."""
+    ph = _ph()
+    exclude: list[str] = []
+    if exclude_addresses:
+        exclude = [a.strip() for a in exclude_addresses.split(",") if a.strip()]
+
+    with get_cursor() as cur:
+        query = (
+            f"SELECT account, balance, limit_amount, authorized, freeze, no_ripple "
+            f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE "
+            f"AND balance != {ph} AND balance != {ph}"
+        )
+        params: list[Any] = [issuer, currency, "0", "0.0"]
+        if exclude:
+            placeholders = ", ".join([ph] * len(exclude))
+            query += f" AND account NOT IN ({placeholders})"
+            params.extend(exclude)
+        query += " ORDER BY CAST(balance AS FLOAT) DESC"
+        cur.execute(query, params)
+        rows = rows_to_list(cur.fetchall())
+
+    return {"issuer": issuer, "currency": currency, "holder_count": len(rows), "holders": rows}
+
+
+# ---------------------------------------------------------------------------
+# Orderbook
+# ---------------------------------------------------------------------------
+
+@app.get("/orderbook")
+def orderbook(
+    taker_gets_currency: str = Query(..., description="Currency the maker gives (e.g. USD)"),
+    taker_gets_issuer: Optional[str] = Query(default=None, description="Issuer for taker_gets (omit for XRP)"),
+    taker_pays_currency: str = Query(..., description="Currency the maker wants (e.g. XRP)"),
+    taker_pays_issuer: Optional[str] = Query(default=None, description="Issuer for taker_pays (omit for XRP)"),
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    """Open offers matching a specific currency pair (from tracked wallets only)."""
+    ph = _ph()
+    conditions = [
+        f"taker_gets_currency = {ph}",
+        f"taker_pays_currency = {ph}",
+    ]
+    params: list[Any] = [taker_gets_currency, taker_pays_currency]
+
+    if taker_gets_issuer:
+        conditions.append(f"taker_gets_issuer = {ph}"); params.append(taker_gets_issuer)
+    else:
+        conditions.append("taker_gets_issuer IS NULL")
+
+    if taker_pays_issuer:
+        conditions.append(f"taker_pays_issuer = {ph}"); params.append(taker_pays_issuer)
+    else:
+        conditions.append("taker_pays_issuer IS NULL")
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT account, sequence, taker_gets_value, taker_pays_value, "
+            f"expiry_iso, flags, quality, ledger_index "
+            f"FROM offers {where} ORDER BY CAST(quality AS FLOAT) ASC LIMIT {ph}",
+            params + [limit],
+        )
+        rows = rows_to_list(cur.fetchall())
+
+    return {
+        "taker_gets": {"currency": taker_gets_currency, "issuer": taker_gets_issuer},
+        "taker_pays": {"currency": taker_pays_currency, "issuer": taker_pays_issuer},
+        "offers": rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Trades (fill extraction from stored meta)
+# ---------------------------------------------------------------------------
+
+def _extract_fills(tx_data_raw: Any, tx_hash: str, ledger_index: int, close_time_iso: Optional[str]) -> list[dict]:
+    """Parse trade fills from a transaction's AffectedNodes."""
+    if isinstance(tx_data_raw, str):
+        try:
+            tx_data_raw = json.loads(tx_data_raw)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(tx_data_raw, dict):
+        return []
+
+    full = tx_data_raw.get("_full_data") if isinstance(tx_data_raw.get("_full_data"), dict) else tx_data_raw
+    meta = full.get("meta") if isinstance(full, dict) and isinstance(full.get("meta"), dict) else {}
+    tx_json = full.get("tx_json") if isinstance(full, dict) else {}
+    if not isinstance(tx_json, dict):
+        tx_json = {}
+
+    maker_account = tx_json.get("Account")
+    fills: list[dict] = []
+
+    for node_wrapper in meta.get("AffectedNodes", []):
+        entry: Optional[dict] = None
+        is_deleted = False
+
+        if "DeletedNode" in node_wrapper:
+            node = node_wrapper["DeletedNode"]
+            if node.get("LedgerEntryType") == "Offer":
+                entry = node.get("FinalFields") or {}
+                is_deleted = True
+        elif "ModifiedNode" in node_wrapper:
+            node = node_wrapper["ModifiedNode"]
+            if node.get("LedgerEntryType") == "Offer":
+                prev = node.get("PreviousFields") or {}
+                final = node.get("FinalFields") or {}
+                # Only include if TakerGets/TakerPays actually changed
+                if "TakerGets" in prev or "TakerPays" in prev:
+                    entry = final
+
+        if not entry:
+            continue
+
+        offer_account = entry.get("Account")
+        tg = entry.get("TakerGets") or {}
+        tp = entry.get("TakerPays") or {}
+
+        if isinstance(tg, str):
+            tg_info = {"currency": "XRP", "issuer": None, "value": tg}
+        else:
+            tg_info = {"currency": tg.get("currency"), "issuer": tg.get("issuer"), "value": tg.get("value")}
+
+        if isinstance(tp, str):
+            tp_info = {"currency": "XRP", "issuer": None, "value": tp}
+        else:
+            tp_info = {"currency": tp.get("currency"), "issuer": tp.get("issuer"), "value": tp.get("value")}
+
+        fills.append({
+            "tx_hash": tx_hash,
+            "ledger_index": ledger_index,
+            "close_time_iso": close_time_iso,
+            "maker_account": offer_account,
+            "taker_account": maker_account,
+            "taker_gets": tg_info,
+            "taker_pays": tp_info,
+            "fully_consumed": is_deleted,
+        })
+
+    return fills
+
+
+@app.get("/trades")
+def trades(
+    issuer: Optional[str] = Query(default=None, description="Filter by currency issuer"),
+    currency: Optional[str] = Query(default=None, description="Filter by currency code"),
+    account: Optional[str] = Query(default=None, description="Filter by maker or taker account"),
+    from_ledger: Optional[int] = Query(default=None),
+    to_ledger: Optional[int] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+    order: str = Query(default="desc", pattern="^(asc|desc)$"),
+):
+    """
+    Extract trade fills from stored transaction metadata.
+    Returns fills from OfferCreate and Payment transactions.
+    """
+    ph = _ph()
+    conditions = ["transaction_type IN ('OfferCreate', 'Payment')"]
+    params: list[Any] = []
+
+    if account:
+        conditions.append(f"(account = {ph} OR destination = {ph})")
+        params += [account, account]
+    if from_ledger is not None:
+        conditions.append(f"ledger_index >= {ph}"); params.append(from_ledger)
+    if to_ledger is not None:
+        conditions.append(f"ledger_index <= {ph}"); params.append(to_ledger)
+
+    where = "WHERE " + " AND ".join(conditions)
+    direction = "DESC" if order == "desc" else "ASC"
+
+    with get_cursor() as cur:
+        cur.execute(
+            f"SELECT transaction_hash, ledger_index, transaction_data "
+            f"FROM transactions {where} ORDER BY ledger_index {direction} LIMIT {ph}",
+            params + [limit * 5],  # fetch more rows since not every tx produces fills
+        )
+        rows = cur.fetchall()
+
+    all_fills: list[dict] = []
+    for row in rows:
+        r = row_to_dict(row)
+        raw = r.get("transaction_data")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (ValueError, TypeError):
+                raw = {}
+        full = raw.get("_full_data") if isinstance(raw, dict) and isinstance(raw.get("_full_data"), dict) else raw or {}
+        close_time_iso = full.get("close_time_iso") if isinstance(full, dict) else None
+        fills = _extract_fills(r.get("transaction_data"), r["transaction_hash"], r["ledger_index"], close_time_iso)
+        # Filter by issuer/currency if requested
+        for fill in fills:
+            if issuer or currency:
+                tg = fill["taker_gets"]
+                tp = fill["taker_pays"]
+                match = (
+                    (not issuer or tg.get("issuer") == issuer or tp.get("issuer") == issuer)
+                    and (not currency or tg.get("currency") == currency or tp.get("currency") == currency)
+                )
+                if not match:
+                    continue
+            all_fills.append(fill)
+        if len(all_fills) >= limit:
+            break
+
+    return {"count": len(all_fills[:limit]), "data": all_fills[:limit]}
+
+
+# ---------------------------------------------------------------------------
+# Ledger resolution
+# ---------------------------------------------------------------------------
+
+@app.get("/ledgers/resolve")
+def resolve_ledger(
+    timestamp: str = Query(..., description="ISO-8601 timestamp or YYYY-MM-DD HH:MM:SS"),
+):
+    """
+    Return the ledger_index closest to the given timestamp.
+    Uses created_at as a proxy for ledger close time.
+    """
+    ph = _ph()
+    is_pg = Config.DATABASE_TYPE == "postgresql"
+
+    with get_cursor() as cur:
+        if is_pg:
+            cur.execute(
+                f"SELECT ledger_index, created_at "
+                f"FROM transactions "
+                f"ORDER BY ABS(EXTRACT(EPOCH FROM (created_at - {ph}::timestamp))) "
+                f"LIMIT 1",
+                (timestamp,),
+            )
+        else:
+            cur.execute(
+                "SELECT ledger_index, created_at "
+                "FROM transactions "
+                "ORDER BY ABS(strftime('%s', created_at) - strftime('%s', ?)) "
+                "LIMIT 1",
+                (timestamp,),
+            )
+        row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No transactions in database yet")
+
+    r = row_to_dict(row)
+    return {"timestamp": timestamp, "ledger_index": r.get("ledger_index"), "nearest_created_at": str(r.get("created_at"))}
+
+
+# ---------------------------------------------------------------------------
+# Tracked wallets
+# ---------------------------------------------------------------------------
+
+@app.get("/wallets")
+def list_tracked_wallets(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """List all wallets being tracked by the hub-and-spoke system."""
+    ph = _ph()
+    offset = (page - 1) * limit
+    with get_cursor() as cur:
+        cur.execute("SELECT COUNT(*) as count FROM tracked_wallets")
+        total = row_to_dict(cur.fetchone()).get("count", 0)
+        cur.execute(
+            f"SELECT address, activation_tx_hash, activated_at FROM tracked_wallets "
+            f"ORDER BY activated_at DESC LIMIT {ph} OFFSET {ph}",
+            (limit, offset),
+        )
+        rows = rows_to_list(cur.fetchall())
+    return {"total": total, "page": page, "limit": limit, "data": rows}
+
+
+# ---------------------------------------------------------------------------
+# Sync (existing)
 # ---------------------------------------------------------------------------
 
 def _encode_cursor(row_id: int) -> str:
@@ -276,7 +609,6 @@ def _decode_cursor(cursor: str) -> int:
 
 
 def _extract_tx_fields(row: dict, include_full: bool) -> dict:
-    """Build the response dict for a single transaction row."""
     raw: Any = row.get("transaction_data")
     if isinstance(raw, str):
         try:
@@ -286,8 +618,6 @@ def _extract_tx_fields(row: dict, include_full: bool) -> dict:
     if not isinstance(raw, dict):
         raw = {}
 
-    # The indexer stores a _full_data sub-object with the canonical fields.
-    # Fall back to the top-level dict for older records that don't have it.
     full = raw.get("_full_data") if isinstance(raw.get("_full_data"), dict) else raw
     meta = full.get("meta") if isinstance(full.get("meta"), dict) else None
 
@@ -316,30 +646,22 @@ def _extract_tx_fields(row: dict, include_full: bool) -> dict:
 @app.get("/sync/transactions")
 def sync_transactions(
     after_ledger: Optional[int] = Query(default=None, description="Return transactions with ledger_index > this value"),
-    cursor: Optional[str] = Query(default=None, description="Opaque cursor from a previous response for pagination"),
-    limit: int = Query(default=100, ge=1, le=1000, description="Max transactions to return"),
-    include_full: bool = Query(default=False, description="Include full tx_json, meta, and close_time_iso"),
+    cursor: Optional[str] = Query(default=None, description="Opaque cursor from a previous response"),
+    limit: int = Query(default=100, ge=1, le=1000),
+    include_full: bool = Query(default=False, description="Include tx_json, meta, and close_time_iso"),
 ):
     """
-    Stream transactions in ascending ledger order, suitable for syncing.
-
-    - Start with `after_ledger` to begin from a known ledger.
-    - Use the returned `next_cursor` on subsequent calls to page forward.
-    - `include_full=true` adds tx_json, meta, and close_time_iso to each record.
-    - Returns `has_more=false` when you have reached the latest data.
+    Stream transactions in ascending ledger order for syncing.
+    Use next_cursor for pagination. has_more=false means you're caught up.
     """
-    ph = "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
-
+    ph = _ph()
     conditions: list[str] = []
     params: list[Any] = []
 
     if cursor:
-        cursor_id = _decode_cursor(cursor)
-        conditions.append(f"id > {ph}")
-        params.append(cursor_id)
+        conditions.append(f"id > {ph}"); params.append(_decode_cursor(cursor))
     elif after_ledger is not None:
-        conditions.append(f"ledger_index > {ph}")
-        params.append(after_ledger)
+        conditions.append(f"ledger_index > {ph}"); params.append(after_ledger)
 
     where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
 
@@ -347,9 +669,7 @@ def sync_transactions(
         cur.execute(
             f"SELECT id, ledger_index, transaction_hash, transaction_type, "
             f"account, destination, fee, source_tag, destination_tag, created_at, transaction_data "
-            f"FROM transactions {where} "
-            f"ORDER BY ledger_index ASC, id ASC "
-            f"LIMIT {ph}",
+            f"FROM transactions {where} ORDER BY ledger_index ASC, id ASC LIMIT {ph}",
             params + [limit],
         )
         rows = rows_to_list(cur.fetchall())
@@ -358,9 +678,4 @@ def sync_transactions(
     has_more = len(rows) == limit
     next_cursor = _encode_cursor(rows[-1]["id"]) if has_more and rows else None
 
-    return {
-        "has_more": has_more,
-        "next_cursor": next_cursor,
-        "count": len(data),
-        "data": data,
-    }
+    return {"has_more": has_more, "next_cursor": next_cursor, "count": len(data), "data": data}
