@@ -266,7 +266,7 @@ def account_balances(
     with get_cursor() as cur:
         query = (
             f"SELECT issuer, currency, balance, limit_amount, limit_peer, "
-            f"authorized, peer_authorized, no_ripple, no_ripple_peer, freeze, peer_freeze, is_deleted "
+            f"authorized, peer_authorized, no_ripple, no_ripple_peer, freeze_flag, peer_freeze_flag, is_deleted "
             f"FROM trustlines WHERE account = {ph} AND is_deleted = FALSE"
         )
         params: list[Any] = [address]
@@ -325,7 +325,7 @@ def token_holders(
 
     with get_cursor() as cur:
         query = (
-            f"SELECT account, balance, limit_amount, authorized, freeze, no_ripple "
+            f"SELECT account, balance, limit_amount, authorized, freeze_flag, no_ripple "
             f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE "
             f"AND balance != {ph} AND balance != {ph}"
         )

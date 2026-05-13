@@ -107,8 +107,8 @@ class Database:
                 peer_authorized BOOLEAN DEFAULT FALSE,
                 no_ripple BOOLEAN DEFAULT FALSE,
                 no_ripple_peer BOOLEAN DEFAULT FALSE,
-                freeze BOOLEAN DEFAULT FALSE,
-                peer_freeze BOOLEAN DEFAULT FALSE,
+                freeze_flag BOOLEAN DEFAULT FALSE,
+                peer_freeze_flag BOOLEAN DEFAULT FALSE,
                 is_deleted BOOLEAN DEFAULT FALSE,
                 ledger_index BIGINT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -201,8 +201,8 @@ class Database:
                 peer_authorized INTEGER DEFAULT 0,
                 no_ripple INTEGER DEFAULT 0,
                 no_ripple_peer INTEGER DEFAULT 0,
-                freeze INTEGER DEFAULT 0,
-                peer_freeze INTEGER DEFAULT 0,
+                freeze_flag INTEGER DEFAULT 0,
+                peer_freeze_flag INTEGER DEFAULT 0,
                 is_deleted INTEGER DEFAULT 0,
                 ledger_index INTEGER,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -404,8 +404,8 @@ class Database:
         peer_authorized: bool,
         no_ripple: bool,
         no_ripple_peer: bool,
-        freeze: bool,
-        peer_freeze: bool,
+        freeze_flag: bool,
+        peer_freeze_flag: bool,
         is_deleted: bool,
         ledger_index: int,
     ):
@@ -416,8 +416,8 @@ class Database:
             p_a = int(peer_authorized)
             nr = int(no_ripple)
             nr_p = int(no_ripple_peer)
-            fr = int(freeze)
-            fr_p = int(peer_freeze)
+            fr = int(freeze_flag)
+            fr_p = int(peer_freeze_flag)
             d = int(is_deleted)
 
             if self.db_type == "postgresql":
@@ -426,18 +426,18 @@ class Database:
                     INSERT INTO trustlines
                         (account, issuer, currency, balance, limit_amount, limit_peer,
                          authorized, peer_authorized, no_ripple, no_ripple_peer,
-                         freeze, peer_freeze, is_deleted, ledger_index, updated_at)
+                         freeze_flag, peer_freeze_flag, is_deleted, ledger_index, updated_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT (account, issuer, currency) DO UPDATE SET
-                        balance        = EXCLUDED.balance,
-                        limit_amount   = EXCLUDED.limit_amount,
-                        limit_peer     = EXCLUDED.limit_peer,
-                        authorized     = EXCLUDED.authorized,
-                        peer_authorized= EXCLUDED.peer_authorized,
-                        no_ripple      = EXCLUDED.no_ripple,
-                        no_ripple_peer = EXCLUDED.no_ripple_peer,
-                        freeze         = EXCLUDED.freeze,
-                        peer_freeze    = EXCLUDED.peer_freeze,
+                        balance          = EXCLUDED.balance,
+                        limit_amount     = EXCLUDED.limit_amount,
+                        limit_peer       = EXCLUDED.limit_peer,
+                        authorized       = EXCLUDED.authorized,
+                        peer_authorized  = EXCLUDED.peer_authorized,
+                        no_ripple        = EXCLUDED.no_ripple,
+                        no_ripple_peer   = EXCLUDED.no_ripple_peer,
+                        freeze_flag      = EXCLUDED.freeze_flag,
+                        peer_freeze_flag = EXCLUDED.peer_freeze_flag,
                         is_deleted     = EXCLUDED.is_deleted,
                         ledger_index   = EXCLUDED.ledger_index,
                         updated_at     = NOW()
@@ -454,18 +454,18 @@ class Database:
                     INSERT INTO trustlines
                         (account, issuer, currency, balance, limit_amount, limit_peer,
                          authorized, peer_authorized, no_ripple, no_ripple_peer,
-                         freeze, peer_freeze, is_deleted, ledger_index, updated_at)
+                         freeze_flag, peer_freeze_flag, is_deleted, ledger_index, updated_at)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
                     ON CONFLICT(account, issuer, currency) DO UPDATE SET
-                        balance        = excluded.balance,
-                        limit_amount   = excluded.limit_amount,
-                        limit_peer     = excluded.limit_peer,
-                        authorized     = excluded.authorized,
-                        peer_authorized= excluded.peer_authorized,
-                        no_ripple      = excluded.no_ripple,
-                        no_ripple_peer = excluded.no_ripple_peer,
-                        freeze         = excluded.freeze,
-                        peer_freeze    = excluded.peer_freeze,
+                        balance          = excluded.balance,
+                        limit_amount     = excluded.limit_amount,
+                        limit_peer       = excluded.limit_peer,
+                        authorized       = excluded.authorized,
+                        peer_authorized  = excluded.peer_authorized,
+                        no_ripple        = excluded.no_ripple,
+                        no_ripple_peer   = excluded.no_ripple_peer,
+                        freeze_flag      = excluded.freeze_flag,
+                        peer_freeze_flag = excluded.peer_freeze_flag,
                         is_deleted     = excluded.is_deleted,
                         ledger_index   = excluded.ledger_index,
                         updated_at     = CURRENT_TIMESTAMP

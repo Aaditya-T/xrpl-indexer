@@ -203,8 +203,8 @@ class StateProcessor:
                     peer_authorized=peer_authorized,
                     no_ripple=no_ripple,
                     no_ripple_peer=no_ripple_peer,
-                    freeze=freeze,
-                    peer_freeze=peer_freeze,
+                    freeze_flag=freeze,
+                    peer_freeze_flag=peer_freeze,
                     is_deleted=False,
                     ledger_index=ledger_index,
                 )

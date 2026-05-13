@@ -69,7 +69,7 @@ class MockDB:
     def upsert_trustline(
         self, account, issuer, currency, balance, limit_amount, limit_peer,
         authorized, peer_authorized, no_ripple, no_ripple_peer,
-        freeze, peer_freeze, is_deleted, ledger_index,
+        freeze_flag, peer_freeze_flag, is_deleted, ledger_index,
     ):
         key = (account, issuer, currency)
         existing = self.trustlines.get(key)
@@ -80,7 +80,7 @@ class MockDB:
             "balance": balance, "limit_amount": limit_amount, "limit_peer": limit_peer,
             "authorized": authorized, "peer_authorized": peer_authorized,
             "no_ripple": no_ripple, "no_ripple_peer": no_ripple_peer,
-            "freeze": freeze, "peer_freeze": peer_freeze,
+            "freeze_flag": freeze_flag, "peer_freeze_flag": peer_freeze_flag,
             "is_deleted": is_deleted, "ledger_index": ledger_index,
         }
 
@@ -499,9 +499,9 @@ class TestRippleState:
         tx = _make_tx([_modified("RippleState", final_fields=fields)])
         sp.process_transaction(tx, ledger_index=2003)
         tl = db.trustlines[(USER_A, GATEWAY, "EUR")]
-        # From USER_A (low) perspective: high has frozen → peer_freeze
-        assert tl["peer_freeze"] is True
-        assert tl["freeze"] is False
+        # From USER_A (low) perspective: high has frozen → peer_freeze_flag
+        assert tl["peer_freeze_flag"] is True
+        assert tl["freeze_flag"] is False
 
     def test_trustline_freeze_set_by_low(self):
         # lsfLowFreeze = 0x00400000
@@ -512,8 +512,8 @@ class TestRippleState:
         tx = _make_tx([_modified("RippleState", final_fields=fields)])
         sp.process_transaction(tx, ledger_index=2004)
         tl = db.trustlines[(USER_A, GATEWAY, "EUR")]
-        assert tl["freeze"] is True
-        assert tl["peer_freeze"] is False
+        assert tl["freeze_flag"] is True
+        assert tl["peer_freeze_flag"] is False
 
     def test_trustline_freeze_cleared(self):
         db = MockDB(tracked={USER_A})
@@ -521,12 +521,12 @@ class TestRippleState:
         fields_frozen = _ripple_state_fields(high=GATEWAY, low=USER_A, currency="EUR", balance="10")
         fields_frozen["Flags"] = 0x00400000
         sp.process_transaction(_make_tx([_modified("RippleState", final_fields=fields_frozen)]), ledger_index=2005)
-        assert db.trustlines[(USER_A, GATEWAY, "EUR")]["freeze"] is True
+        assert db.trustlines[(USER_A, GATEWAY, "EUR")]["freeze_flag"] is True
 
         fields_clear = _ripple_state_fields(high=GATEWAY, low=USER_A, currency="EUR", balance="10")
         fields_clear["Flags"] = 0
         sp.process_transaction(_make_tx([_modified("RippleState", final_fields=fields_clear)]), ledger_index=2006)
-        assert db.trustlines[(USER_A, GATEWAY, "EUR")]["freeze"] is False
+        assert db.trustlines[(USER_A, GATEWAY, "EUR")]["freeze_flag"] is False
 
     def test_trustline_no_ripple_set(self):
         # lsfLowNoRipple = 0x00100000
