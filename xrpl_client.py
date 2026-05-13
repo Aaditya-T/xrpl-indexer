@@ -62,8 +62,14 @@ class XRPLClient:
             print(f"Error getting transaction {tx_hash}: {e}")
             return None
     
-    def get_ledger_with_transactions(self, ledger_index: int) -> List[Dict[str, Any]]:
-        """Get all full transaction details from a specific ledger"""
+    def get_ledger_with_transactions(
+        self, ledger_index: int
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """
+        Get all full transaction details from a specific ledger.
+        Returns (transactions, close_time_iso) — close_time_iso may be None
+        if the node does not return it.
+        """
         try:
             response = self.client.request(
                 Ledger(
@@ -72,23 +78,25 @@ class XRPLClient:
                     expand=True
                 )
             )
-            
+
             if response.is_successful():
                 ledger_data = response.result.get('ledger', {})
+                close_time_iso: Optional[str] = ledger_data.get('close_time_iso')
                 transactions = ledger_data.get('transactions', [])
-                
-                # Add ledger_index to each transaction
+
+                # Stamp every transaction with ledger_index and close_time_iso
                 for tx in transactions:
                     if isinstance(tx, dict):
                         tx['ledger_index'] = ledger_index
-                        # Ensure hash is present
+                        if close_time_iso:
+                            tx['close_time_iso'] = close_time_iso
                         if 'hash' not in tx and 'tx' in tx:
                             tx['hash'] = tx['tx'].get('hash')
-                
-                return transactions if transactions else []
+
+                return transactions if transactions else [], close_time_iso
             else:
                 print(f"Failed to get ledger {ledger_index} with transactions: {response.result}")
-                return []
+                return [], None
         except Exception as e:
             print(f"Error getting ledger {ledger_index} with transactions: {e}")
-            return []
+            return [], None

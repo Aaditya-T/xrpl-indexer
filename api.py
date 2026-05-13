@@ -575,8 +575,11 @@ def resolve_ledger(
     timestamp: str = Query(..., description="ISO-8601 timestamp, e.g. 2024-01-15T12:00:00Z"),
 ):
     """
-    Return the ledger_index whose close_time_iso is closest to the given timestamp.
-    Uses the close_time_iso stored in each transaction's metadata.
+    Return the ledger_index whose close time is closest to the given timestamp.
+
+    Uses the ledger_metadata table which is written for every processed ledger,
+    regardless of whether any transactions from that ledger were stored.
+    This means the result is never affected by transaction filters.
     """
     is_pg = Config.DATABASE_TYPE == "postgresql"
     ph = _ph()
@@ -584,27 +587,18 @@ def resolve_ledger(
     with get_cursor() as cur:
         if is_pg:
             cur.execute(
-                "SELECT ledger_index, "
-                "transaction_data->'_full_data'->>'close_time_iso' AS close_time_iso "
-                "FROM transactions "
-                "WHERE transaction_data->'_full_data'->>'close_time_iso' IS NOT NULL "
-                f"ORDER BY ABS(EXTRACT(EPOCH FROM ("
-                f"  (transaction_data->'_full_data'->>'close_time_iso')::timestamptz"
-                f"  - {ph}::timestamptz"
-                f"))) "
-                "LIMIT 1",
+                f"SELECT ledger_index, close_time_iso "
+                f"FROM ledger_metadata "
+                f"ORDER BY ABS(EXTRACT(EPOCH FROM "
+                f"  (close_time_iso::timestamptz - {ph}::timestamptz))) "
+                f"LIMIT 1",
                 (timestamp,),
             )
         else:
             cur.execute(
-                "SELECT ledger_index, "
-                "json_extract(transaction_data, '$._full_data.close_time_iso') AS close_time_iso "
-                "FROM transactions "
-                "WHERE json_extract(transaction_data, '$._full_data.close_time_iso') IS NOT NULL "
-                "ORDER BY ABS("
-                "  strftime('%s', json_extract(transaction_data, '$._full_data.close_time_iso'))"
-                "  - strftime('%s', ?)"
-                ") "
+                "SELECT ledger_index, close_time_iso "
+                "FROM ledger_metadata "
+                "ORDER BY ABS(strftime('%s', close_time_iso) - strftime('%s', ?)) "
                 "LIMIT 1",
                 (timestamp,),
             )
@@ -613,15 +607,14 @@ def resolve_ledger(
     if not row:
         raise HTTPException(
             status_code=404,
-            detail="No transactions with close_time_iso found. "
-                   "Ensure include_full data is stored by the indexer.",
+            detail="No ledger metadata found. The indexer must process at least one ledger first.",
         )
 
     r = row_to_dict(row)
     return {
-        "timestamp": timestamp,
+        "requested_timestamp": timestamp,
         "ledger_index": r.get("ledger_index"),
-        "close_time_iso": r.get("close_time_iso"),
+        "ledger_close_time": r.get("close_time_iso"),
     }
 
 

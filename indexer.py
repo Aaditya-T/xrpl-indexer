@@ -147,8 +147,12 @@ class XRPLIndexer:
         Returns the number of transactions stored in the transactions table.
         """
         print(f"Processing ledger {ledger_index}...")
-        transactions = self.xrpl_client.get_ledger_with_transactions(ledger_index)
+        transactions, close_time_iso = self.xrpl_client.get_ledger_with_transactions(ledger_index)
         stored_count = 0
+
+        # Always store ledger close time — independent of any transaction filters
+        if close_time_iso:
+            self.db.upsert_ledger_metadata(ledger_index, close_time_iso)
 
         for tx in transactions:
             if not isinstance(tx, dict):

@@ -135,6 +135,14 @@ class Database:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_metadata (
+                ledger_index BIGINT PRIMARY KEY,
+                close_time_iso TEXT NOT NULL,
+                stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ledger_index ON transactions(ledger_index)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_hash ON transactions(transaction_hash)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(transaction_type)")
@@ -226,6 +234,14 @@ class Database:
                 ledger_index INTEGER,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 PRIMARY KEY (account, sequence)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_metadata (
+                ledger_index INTEGER PRIMARY KEY,
+                close_time_iso TEXT NOT NULL,
+                stored_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
@@ -330,6 +346,32 @@ class Database:
         return [{"address": r[0], "tx_hash": r[1], "transaction_data": r[2]} for r in rows]
 
     # ------------------------------------------------------------------
+    # Ledger metadata
+    # ------------------------------------------------------------------
+
+    def upsert_ledger_metadata(self, ledger_index: int, close_time_iso: str) -> None:
+        """Store the close time for a ledger. Written for every processed ledger."""
+        cursor = self.conn.cursor()
+        try:
+            if self.db_type == "postgresql":
+                cursor.execute(
+                    "INSERT INTO ledger_metadata (ledger_index, close_time_iso) "
+                    "VALUES (%s, %s) ON CONFLICT (ledger_index) DO NOTHING",
+                    (ledger_index, close_time_iso),
+                )
+            else:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO ledger_metadata (ledger_index, close_time_iso) "
+                    "VALUES (?, ?)",
+                    (ledger_index, close_time_iso),
+                )
+            self.conn.commit()
+        except Exception as e:
+            print(f"Error storing ledger metadata for {ledger_index}: {e}")
+            self.conn.rollback()
+        finally:
+            cursor.close()
+
     # Account states
     # ------------------------------------------------------------------
 
