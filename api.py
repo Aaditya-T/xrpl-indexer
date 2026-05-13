@@ -9,8 +9,270 @@ from typing import Any, Generator, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from config import Config
+
+
+# ---------------------------------------------------------------------------
+# Response models
+# ---------------------------------------------------------------------------
+
+class HealthResponse(BaseModel):
+    status: str
+
+
+class StatusResponse(BaseModel):
+    last_processed_ledger_index: Optional[int] = None
+    updated_at: Optional[str] = None
+    tracked_wallets: int
+
+
+# --- Transactions ---
+
+class TransactionSummary(BaseModel):
+    id: Optional[int] = None
+    ledger_index: Optional[int] = None
+    transaction_hash: Optional[str] = None
+    transaction_type: Optional[str] = None
+    account: Optional[str] = None
+    destination: Optional[str] = None
+    amount: Optional[str] = None
+    fee: Optional[str] = None
+    source_tag: Optional[int] = None
+    destination_tag: Optional[int] = None
+    created_at: Optional[str] = None
+
+
+class TransactionListResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    pages: int
+    data: list[TransactionSummary]
+
+
+class TransactionDetail(BaseModel):
+    status: Optional[str] = None
+    ledger_index: Optional[int] = None
+    transaction_hash: Optional[str] = None
+    transaction_type: Optional[str] = None
+    close_time_iso: Optional[str] = None
+    tx_json: Optional[dict[str, Any]] = None
+    meta: Optional[dict[str, Any]] = None
+
+
+# --- Stats ---
+
+class TypeCount(BaseModel):
+    transaction_type: Optional[str] = None
+    count: int
+
+
+class DayCount(BaseModel):
+    date: Optional[str] = None
+    count: int
+
+
+class LedgerRange(BaseModel):
+    min_ledger: Optional[int] = None
+    max_ledger: Optional[int] = None
+
+
+class IndexerStateInfo(BaseModel):
+    last_processed_ledger_index: Optional[int] = None
+    updated_at: Optional[str] = None
+
+
+class StatsResponse(BaseModel):
+    total_transactions: int
+    by_transaction_type: list[TypeCount]
+    by_day: list[DayCount]
+    ledger_range: LedgerRange
+    indexer_state: IndexerStateInfo
+    tracked_wallets: int
+
+
+class AccountEntry(BaseModel):
+    account: Optional[str] = None
+    count: int
+
+
+class TopAccountsResponse(BaseModel):
+    data: list[AccountEntry]
+
+
+# --- Account state ---
+
+class AccountState(BaseModel):
+    address: str
+    balance_drops: Optional[int] = None
+    sequence: Optional[int] = None
+    owner_count: Optional[int] = None
+    flags: Optional[int] = None
+    updated_at: Optional[str] = None
+    ledger_index: Optional[int] = None
+
+
+# --- Balances ---
+
+class Balance(BaseModel):
+    currency: Optional[str] = None
+    issuer: Optional[str] = None
+    balance: Optional[str] = None
+    limit_amount: Optional[str] = None
+    limit_peer: Optional[str] = None
+    authorized: Optional[bool] = None
+    peer_authorized: Optional[bool] = None
+    no_ripple: Optional[bool] = None
+    no_ripple_peer: Optional[bool] = None
+    freeze_flag: Optional[bool] = None
+    peer_freeze_flag: Optional[bool] = None
+    is_deleted: Optional[bool] = None
+
+
+class BalancesResponse(BaseModel):
+    address: str
+    balances: list[Balance]
+
+
+# --- Offers ---
+
+class Offer(BaseModel):
+    sequence: Optional[int] = None
+    taker_gets_currency: Optional[str] = None
+    taker_gets_issuer: Optional[str] = None
+    taker_gets_value: Optional[str] = None
+    taker_pays_currency: Optional[str] = None
+    taker_pays_issuer: Optional[str] = None
+    taker_pays_value: Optional[str] = None
+    expiry_iso: Optional[str] = None
+    flags: Optional[int] = None
+    quality: Optional[str] = None
+    ledger_index: Optional[int] = None
+
+
+class OffersResponse(BaseModel):
+    address: str
+    offers: list[Offer]
+
+
+# --- Token holders ---
+
+class Holder(BaseModel):
+    account: Optional[str] = None
+    balance: Optional[str] = None
+    limit_amount: Optional[str] = None
+    authorized: Optional[bool] = None
+    freeze_flag: Optional[bool] = None
+    no_ripple: Optional[bool] = None
+
+
+class HoldersResponse(BaseModel):
+    issuer: str
+    currency: str
+    holder_count: int
+    holders: list[Holder]
+
+
+# --- Orderbook ---
+
+class CurrencySpec(BaseModel):
+    currency: str
+    issuer: Optional[str] = None
+
+
+class OrderbookOffer(BaseModel):
+    account: Optional[str] = None
+    sequence: Optional[int] = None
+    taker_gets_value: Optional[str] = None
+    taker_pays_value: Optional[str] = None
+    expiry_iso: Optional[str] = None
+    flags: Optional[int] = None
+    quality: Optional[str] = None
+    ledger_index: Optional[int] = None
+
+
+class OrderbookResponse(BaseModel):
+    taker_gets: CurrencySpec
+    taker_pays: CurrencySpec
+    offers: list[OrderbookOffer]
+
+
+# --- Trades ---
+
+class AmountInfo(BaseModel):
+    currency: Optional[str] = None
+    issuer: Optional[str] = None
+    value: Optional[str] = None
+
+
+class Fill(BaseModel):
+    tx_hash: Optional[str] = None
+    ledger_index: Optional[int] = None
+    close_time_iso: Optional[str] = None
+    maker_account: Optional[str] = None
+    taker_account: Optional[str] = None
+    filled_taker_gets: Optional[AmountInfo] = None
+    filled_taker_pays: Optional[AmountInfo] = None
+    fully_consumed: bool
+
+
+class TradesResponse(BaseModel):
+    count: int
+    data: list[Fill]
+
+
+# --- Ledger resolve ---
+
+class LedgerResolveResponse(BaseModel):
+    requested_timestamp: str
+    ledger_index: Optional[int] = None
+    ledger_close_time: Optional[str] = None
+
+
+# --- Wallets ---
+
+class TrackedWallet(BaseModel):
+    address: str
+    activation_tx_hash: Optional[str] = None
+    activated_at: Optional[str] = None
+
+
+class WalletListResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    data: list[TrackedWallet]
+
+
+# --- Sync ---
+
+class SyncTransaction(BaseModel):
+    id: Optional[int] = None
+    ledger_index: Optional[int] = None
+    transaction_hash: Optional[str] = None
+    transaction_type: Optional[str] = None
+    account: Optional[str] = None
+    destination: Optional[str] = None
+    fee: Optional[str] = None
+    source_tag: Optional[int] = None
+    destination_tag: Optional[int] = None
+    created_at: Optional[str] = None
+    close_time_iso: Optional[str] = None
+    tx_index: Optional[int] = None
+    tx_json: Optional[dict[str, Any]] = None
+    meta: Optional[dict[str, Any]] = None
+
+
+class SyncResponse(BaseModel):
+    has_more: bool
+    next_cursor: Optional[str] = None
+    count: int
+    data: list[SyncTransaction]
+
+
+# ---------------------------------------------------------------------------
 
 app = FastAPI(title="XRPL Indexer API", version="1.0.0")
 
@@ -65,7 +327,7 @@ def _ph() -> str:
 # Health / Status
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse)
 def health():
     """Simple liveness check."""
     try:
@@ -76,7 +338,7 @@ def health():
         raise HTTPException(status_code=503, detail=f"Database unreachable: {e}")
 
 
-@app.get("/status")
+@app.get("/status", response_model=StatusResponse)
 def status():
     """Return the last processed ledger index and tracked wallet count."""
     with get_cursor() as cur:
@@ -97,7 +359,7 @@ def status():
 # Transactions
 # ---------------------------------------------------------------------------
 
-@app.get("/transactions")
+@app.get("/transactions", response_model=TransactionListResponse)
 def list_transactions(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1, le=500),
@@ -153,7 +415,7 @@ def list_transactions(
             "pages": max(1, -(-int(total) // limit)), "data": rows}
 
 
-@app.get("/transactions/{tx_hash}")
+@app.get("/transactions/{tx_hash}", response_model=TransactionDetail)
 def get_transaction(tx_hash: str):
     """Fetch a single transaction by hash with clean structured fields."""
     ph = _ph()
@@ -189,7 +451,7 @@ def get_transaction(tx_hash: str):
 # Stats / Aggregations
 # ---------------------------------------------------------------------------
 
-@app.get("/stats")
+@app.get("/stats", response_model=StatsResponse)
 def stats():
     """Aggregated statistics about stored transactions."""
     with get_cursor() as cur:
@@ -222,7 +484,7 @@ def stats():
     }
 
 
-@app.get("/stats/accounts")
+@app.get("/stats/accounts", response_model=TopAccountsResponse)
 def top_accounts(limit: int = Query(default=20, ge=1, le=100)):
     """Most active source accounts."""
     ph = _ph()
@@ -240,7 +502,7 @@ def top_accounts(limit: int = Query(default=20, ge=1, le=100)):
 # Account state endpoints (hub-and-spoke)
 # ---------------------------------------------------------------------------
 
-@app.get("/accounts/{address}/info")
+@app.get("/accounts/{address}/info", response_model=AccountState)
 def account_info(address: str):
     """Current account state: balance, sequence, flags."""
     ph = _ph()
@@ -252,7 +514,7 @@ def account_info(address: str):
     return row_to_dict(row)
 
 
-@app.get("/accounts/{address}/balances")
+@app.get("/accounts/{address}/balances", response_model=BalancesResponse)
 def account_balances(
     address: str,
     include_xrp: bool = Query(default=False, description="Include XRP balance as a row"),
@@ -291,7 +553,7 @@ def account_balances(
     return {"address": address, "balances": result}
 
 
-@app.get("/accounts/{address}/offers")
+@app.get("/accounts/{address}/offers", response_model=OffersResponse)
 def account_offers(address: str):
     """All currently open offers placed by a tracked account."""
     ph = _ph()
@@ -311,7 +573,7 @@ def account_offers(address: str):
 # Token holders
 # ---------------------------------------------------------------------------
 
-@app.get("/tokens/{issuer}/{currency}/holders")
+@app.get("/tokens/{issuer}/{currency}/holders", response_model=HoldersResponse)
 def token_holders(
     issuer: str,
     currency: str,
@@ -345,7 +607,7 @@ def token_holders(
 # Orderbook
 # ---------------------------------------------------------------------------
 
-@app.get("/orderbook")
+@app.get("/orderbook", response_model=OrderbookResponse)
 def orderbook(
     taker_gets_currency: str = Query(..., description="Currency the maker gives (e.g. USD)"),
     taker_gets_issuer: Optional[str] = Query(default=None, description="Issuer for taker_gets (omit for XRP)"),
@@ -499,7 +761,7 @@ def _extract_fills(tx_data_raw: Any, tx_hash: str, ledger_index: int, close_time
     return fills
 
 
-@app.get("/trades")
+@app.get("/trades", response_model=TradesResponse)
 def trades(
     issuer: Optional[str] = Query(default=None, description="Filter by currency issuer"),
     currency: Optional[str] = Query(default=None, description="Filter by currency code"),
@@ -570,7 +832,7 @@ def trades(
 # Ledger resolution
 # ---------------------------------------------------------------------------
 
-@app.get("/ledgers/resolve")
+@app.get("/ledgers/resolve", response_model=LedgerResolveResponse)
 def resolve_ledger(
     timestamp: str = Query(..., description="ISO-8601 timestamp, e.g. 2024-01-15T12:00:00Z"),
 ):
@@ -622,7 +884,7 @@ def resolve_ledger(
 # Tracked wallets
 # ---------------------------------------------------------------------------
 
-@app.get("/wallets")
+@app.get("/wallets", response_model=WalletListResponse)
 def list_tracked_wallets(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=100, ge=1, le=500),
@@ -692,7 +954,7 @@ def _extract_tx_fields(row: dict, include_full: bool) -> dict:
     return result
 
 
-@app.get("/sync/transactions")
+@app.get("/sync/transactions", response_model=SyncResponse)
 def sync_transactions(
     after_ledger: Optional[int] = Query(default=None, description="Return transactions with ledger_index > this value"),
     cursor: Optional[str] = Query(default=None, description="Opaque cursor from a previous response"),
