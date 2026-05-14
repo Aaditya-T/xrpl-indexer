@@ -52,9 +52,10 @@ class Database:
     def _create_tables_pg(self, cursor):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS indexer_state (
-                id SERIAL PRIMARY KEY,
+                id INTEGER PRIMARY KEY DEFAULT 1,
                 last_processed_ledger_index BIGINT NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CHECK (id = 1)
             )
         """)
 
@@ -154,9 +155,10 @@ class Database:
     def _create_tables_sqlite(self, cursor):
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS indexer_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY DEFAULT 1,
                 last_processed_ledger_index INTEGER NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CHECK (id = 1)
             )
         """)
 
@@ -655,7 +657,7 @@ class Database:
 
     def get_last_processed_ledger_index(self) -> Optional[int]:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT last_processed_ledger_index FROM indexer_state ORDER BY id DESC LIMIT 1")
+        cursor.execute("SELECT last_processed_ledger_index FROM indexer_state WHERE id = 1")
         result = cursor.fetchone()
         cursor.close()
         if result:
@@ -667,18 +669,26 @@ class Database:
 
     def update_last_processed_ledger_index(self, ledger_index: int):
         cursor = self.conn.cursor()
-        if self.db_type == "postgresql":
-            cursor.execute(
-                "INSERT INTO indexer_state (last_processed_ledger_index) VALUES (%s)",
-                (ledger_index,),
-            )
-        else:
-            cursor.execute(
-                "INSERT INTO indexer_state (last_processed_ledger_index) VALUES (?)",
-                (ledger_index,),
-            )
-        self.conn.commit()
-        cursor.close()
+        try:
+            if self.db_type == "postgresql":
+                cursor.execute(
+                    "INSERT INTO indexer_state (id, last_processed_ledger_index) VALUES (1, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "last_processed_ledger_index = EXCLUDED.last_processed_ledger_index, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (ledger_index,),
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO indexer_state (id, last_processed_ledger_index) VALUES (1, ?) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "last_processed_ledger_index = excluded.last_processed_ledger_index, "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (ledger_index,),
+                )
+            self.conn.commit()
+        finally:
+            cursor.close()
 
     def insert_transaction(self, tx_data: Dict[str, Any]):
         cursor = self.conn.cursor()
