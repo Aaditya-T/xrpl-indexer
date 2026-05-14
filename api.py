@@ -21,11 +21,10 @@ from config import Config
 # ---------------------------------------------------------------------------
 
 class _Base(BaseModel):
-    """All response models inherit from this so datetime fields are
-    automatically serialised to ISO-8601 strings in the JSON output.
-    Pydantic v2 does not silently coerce datetime→str, which causes
-    500s when PostgreSQL returns TIMESTAMP columns as datetime objects."""
-    model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
+    """All response models inherit from this.
+    model_config with arbitrary_types_allowed lets timestamp columns
+    (datetime from PostgreSQL, str from SQLite) pass validation cleanly."""
+    model_config = {"arbitrary_types_allowed": True}
 
 
 class HealthResponse(_Base):
@@ -34,7 +33,7 @@ class HealthResponse(_Base):
 
 class StatusResponse(_Base):
     last_processed_ledger_index: Optional[int] = None
-    updated_at: Optional[str] = None
+    updated_at: Optional[Any] = None
     tracked_wallets: int
 
 
@@ -51,7 +50,7 @@ class TransactionSummary(_Base):
     fee: Optional[str] = None
     source_tag: Optional[int] = None
     destination_tag: Optional[int] = None
-    created_at: Optional[str] = None
+    created_at: Optional[Any] = None
 
 
 class TransactionListResponse(_Base):
@@ -91,7 +90,7 @@ class LedgerRange(_Base):
 
 class IndexerStateInfo(_Base):
     last_processed_ledger_index: Optional[int] = None
-    updated_at: Optional[str] = None
+    updated_at: Optional[Any] = None
 
 
 class StatsResponse(_Base):
@@ -120,7 +119,7 @@ class AccountState(_Base):
     sequence: Optional[int] = None
     owner_count: Optional[int] = None
     flags: Optional[int] = None
-    updated_at: Optional[str] = None
+    updated_at: Optional[Any] = None
     ledger_index: Optional[int] = None
 
 
@@ -246,7 +245,7 @@ class LedgerResolveResponse(_Base):
 class TrackedWallet(_Base):
     address: str
     activation_tx_hash: Optional[str] = None
-    activated_at: Optional[str] = None
+    activated_at: Optional[Any] = None
 
 
 class WalletListResponse(_Base):
@@ -268,7 +267,7 @@ class SyncTransaction(_Base):
     fee: Optional[str] = None
     source_tag: Optional[int] = None
     destination_tag: Optional[int] = None
-    created_at: Optional[str] = None
+    created_at: Optional[Any] = None
     close_time_iso: Optional[str] = None
     tx_index: Optional[int] = None
     tx_json: Optional[dict[str, Any]] = None
