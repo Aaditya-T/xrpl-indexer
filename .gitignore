@@ -42,3 +42,5 @@ wheels/
 
 # Logs
 *.log
+
+attached_assets/
