@@ -7,6 +7,8 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
+from datetime import datetime
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,11 +20,19 @@ from config import Config
 # Response models
 # ---------------------------------------------------------------------------
 
-class HealthResponse(BaseModel):
+class _Base(BaseModel):
+    """All response models inherit from this so datetime fields are
+    automatically serialised to ISO-8601 strings in the JSON output.
+    Pydantic v2 does not silently coerce datetime→str, which causes
+    500s when PostgreSQL returns TIMESTAMP columns as datetime objects."""
+    model_config = {"json_encoders": {datetime: lambda v: v.isoformat()}}
+
+
+class HealthResponse(_Base):
     status: str
 
 
-class StatusResponse(BaseModel):
+class StatusResponse(_Base):
     last_processed_ledger_index: Optional[int] = None
     updated_at: Optional[str] = None
     tracked_wallets: int
@@ -30,7 +40,7 @@ class StatusResponse(BaseModel):
 
 # --- Transactions ---
 
-class TransactionSummary(BaseModel):
+class TransactionSummary(_Base):
     id: Optional[int] = None
     ledger_index: Optional[int] = None
     transaction_hash: Optional[str] = None
@@ -44,7 +54,7 @@ class TransactionSummary(BaseModel):
     created_at: Optional[str] = None
 
 
-class TransactionListResponse(BaseModel):
+class TransactionListResponse(_Base):
     total: int
     page: int
     limit: int
@@ -52,7 +62,7 @@ class TransactionListResponse(BaseModel):
     data: list[TransactionSummary]
 
 
-class TransactionDetail(BaseModel):
+class TransactionDetail(_Base):
     status: Optional[str] = None
     ledger_index: Optional[int] = None
     transaction_hash: Optional[str] = None
@@ -64,27 +74,27 @@ class TransactionDetail(BaseModel):
 
 # --- Stats ---
 
-class TypeCount(BaseModel):
+class TypeCount(_Base):
     transaction_type: Optional[str] = None
     count: int
 
 
-class DayCount(BaseModel):
+class DayCount(_Base):
     date: Optional[str] = None
     count: int
 
 
-class LedgerRange(BaseModel):
+class LedgerRange(_Base):
     min_ledger: Optional[int] = None
     max_ledger: Optional[int] = None
 
 
-class IndexerStateInfo(BaseModel):
+class IndexerStateInfo(_Base):
     last_processed_ledger_index: Optional[int] = None
     updated_at: Optional[str] = None
 
 
-class StatsResponse(BaseModel):
+class StatsResponse(_Base):
     total_transactions: int
     by_transaction_type: list[TypeCount]
     by_day: list[DayCount]
@@ -93,18 +103,18 @@ class StatsResponse(BaseModel):
     tracked_wallets: int
 
 
-class AccountEntry(BaseModel):
+class AccountEntry(_Base):
     account: Optional[str] = None
     count: int
 
 
-class TopAccountsResponse(BaseModel):
+class TopAccountsResponse(_Base):
     data: list[AccountEntry]
 
 
 # --- Account state ---
 
-class AccountState(BaseModel):
+class AccountState(_Base):
     address: str
     balance_drops: Optional[int] = None
     sequence: Optional[int] = None
@@ -116,7 +126,7 @@ class AccountState(BaseModel):
 
 # --- Balances ---
 
-class Balance(BaseModel):
+class Balance(_Base):
     currency: Optional[str] = None
     issuer: Optional[str] = None
     balance: Optional[str] = None
@@ -131,14 +141,14 @@ class Balance(BaseModel):
     is_deleted: Optional[bool] = None
 
 
-class BalancesResponse(BaseModel):
+class BalancesResponse(_Base):
     address: str
     balances: list[Balance]
 
 
 # --- Offers ---
 
-class Offer(BaseModel):
+class Offer(_Base):
     sequence: Optional[int] = None
     taker_gets_currency: Optional[str] = None
     taker_gets_issuer: Optional[str] = None
@@ -152,14 +162,14 @@ class Offer(BaseModel):
     ledger_index: Optional[int] = None
 
 
-class OffersResponse(BaseModel):
+class OffersResponse(_Base):
     address: str
     offers: list[Offer]
 
 
 # --- Token holders ---
 
-class Holder(BaseModel):
+class Holder(_Base):
     account: Optional[str] = None
     balance: Optional[str] = None
     limit_amount: Optional[str] = None
@@ -168,7 +178,7 @@ class Holder(BaseModel):
     no_ripple: Optional[bool] = None
 
 
-class HoldersResponse(BaseModel):
+class HoldersResponse(_Base):
     issuer: str
     currency: str
     holder_count: int
@@ -177,12 +187,12 @@ class HoldersResponse(BaseModel):
 
 # --- Orderbook ---
 
-class CurrencySpec(BaseModel):
+class CurrencySpec(_Base):
     currency: str
     issuer: Optional[str] = None
 
 
-class OrderbookOffer(BaseModel):
+class OrderbookOffer(_Base):
     account: Optional[str] = None
     sequence: Optional[int] = None
     taker_gets_value: Optional[str] = None
@@ -193,7 +203,7 @@ class OrderbookOffer(BaseModel):
     ledger_index: Optional[int] = None
 
 
-class OrderbookResponse(BaseModel):
+class OrderbookResponse(_Base):
     taker_gets: CurrencySpec
     taker_pays: CurrencySpec
     offers: list[OrderbookOffer]
@@ -201,13 +211,13 @@ class OrderbookResponse(BaseModel):
 
 # --- Trades ---
 
-class AmountInfo(BaseModel):
+class AmountInfo(_Base):
     currency: Optional[str] = None
     issuer: Optional[str] = None
     value: Optional[str] = None
 
 
-class Fill(BaseModel):
+class Fill(_Base):
     tx_hash: Optional[str] = None
     ledger_index: Optional[int] = None
     close_time_iso: Optional[str] = None
@@ -218,14 +228,14 @@ class Fill(BaseModel):
     fully_consumed: bool
 
 
-class TradesResponse(BaseModel):
+class TradesResponse(_Base):
     count: int
     data: list[Fill]
 
 
 # --- Ledger resolve ---
 
-class LedgerResolveResponse(BaseModel):
+class LedgerResolveResponse(_Base):
     requested_timestamp: str
     ledger_index: Optional[int] = None
     ledger_close_time: Optional[str] = None
@@ -233,13 +243,13 @@ class LedgerResolveResponse(BaseModel):
 
 # --- Wallets ---
 
-class TrackedWallet(BaseModel):
+class TrackedWallet(_Base):
     address: str
     activation_tx_hash: Optional[str] = None
     activated_at: Optional[str] = None
 
 
-class WalletListResponse(BaseModel):
+class WalletListResponse(_Base):
     total: int
     page: int
     limit: int
@@ -248,7 +258,7 @@ class WalletListResponse(BaseModel):
 
 # --- Sync ---
 
-class SyncTransaction(BaseModel):
+class SyncTransaction(_Base):
     id: Optional[int] = None
     ledger_index: Optional[int] = None
     transaction_hash: Optional[str] = None
@@ -265,7 +275,7 @@ class SyncTransaction(BaseModel):
     meta: Optional[dict[str, Any]] = None
 
 
-class SyncResponse(BaseModel):
+class SyncResponse(_Base):
     has_more: bool
     next_cursor: Optional[str] = None
     count: int
