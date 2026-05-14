@@ -79,7 +79,7 @@ class TypeCount(_Base):
 
 
 class DayCount(_Base):
-    date: Optional[str] = None
+    date: Optional[Any] = None
     count: int
 
 
