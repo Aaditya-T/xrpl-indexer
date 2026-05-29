@@ -59,93 +59,6 @@ So with `FILTER_SOURCE_TAGS=608402356` and `CENTRAL_WALLET_ADDRESS=rHub...`, onl
 
 ---
 
-## Database Schema
-
-### `indexer_state` (single row)
-| Column | Type | Description |
-|---|---|---|
-| `id` | INTEGER | Always 1 — enforced by CHECK constraint |
-| `last_processed_ledger_index` | BIGINT | Resume point on restart |
-| `updated_at` | TIMESTAMP | Last update time |
-
-### `transactions`
-| Column | Type | Description |
-|---|---|---|
-| `id` | SERIAL | Primary key |
-| `ledger_index` | BIGINT | Ledger containing this transaction |
-| `transaction_hash` | VARCHAR | Unique hash |
-| `transaction_type` | VARCHAR | Payment, OfferCreate, TrustSet, etc. |
-| `account` | VARCHAR | Source account |
-| `destination` | VARCHAR | Destination account (if any) |
-| `amount` | TEXT | Amount (drops for XRP, JSON for IOU) |
-| `fee` | VARCHAR | Transaction fee in drops |
-| `source_tag` | BIGINT | Source tag (if present) |
-| `destination_tag` | BIGINT | Destination tag (if present) |
-| `transaction_data` | JSONB/JSON | Full raw transaction + metadata |
-| `created_at` | TIMESTAMP | When stored |
-
-### `ledger_metadata`
-| Column | Type | Description |
-|---|---|---|
-| `ledger_index` | BIGINT | Primary key |
-| `close_time_iso` | TEXT | Ledger close time (ISO-8601) |
-| `stored_at` | TIMESTAMP | When recorded |
-
-Written for **every processed ledger** regardless of filters. Powers `/ledgers/resolve`.
-
-### `tracked_wallets`
-| Column | Type | Description |
-|---|---|---|
-| `address` | VARCHAR | Wallet address |
-| `activation_tx_hash` | VARCHAR | Hash of the funding transaction |
-| `activated_at` | TIMESTAMP | When discovered |
-
-### `account_states`
-| Column | Type | Description |
-|---|---|---|
-| `address` | VARCHAR | Primary key |
-| `balance_drops` | BIGINT | XRP balance in drops |
-| `sequence` | BIGINT | Account sequence number |
-| `owner_count` | INT | Number of owned objects |
-| `flags` | BIGINT | Account flags bitmask |
-| `ledger_index` | BIGINT | Ledger of last update |
-| `updated_at` | TIMESTAMP | When last updated |
-
-### `trustlines`
-| Column | Type | Description |
-|---|---|---|
-| `account` | VARCHAR | Account holding the trust line |
-| `issuer` | VARCHAR | Token issuer |
-| `currency` | VARCHAR | Currency code |
-| `balance` | TEXT | Current balance |
-| `limit_amount` | TEXT | Trust limit set by account |
-| `limit_peer` | TEXT | Trust limit set by issuer |
-| `authorized` | BOOLEAN | Whether account is authorized |
-| `peer_authorized` | BOOLEAN | Whether issuer is authorized |
-| `no_ripple` | BOOLEAN | No-ripple flag |
-| `no_ripple_peer` | BOOLEAN | Peer no-ripple flag |
-| `freeze_flag` | BOOLEAN | Freeze flag |
-| `peer_freeze_flag` | BOOLEAN | Peer freeze flag |
-| `is_deleted` | BOOLEAN | True if removed via DeletedNode |
-
-### `offers`
-| Column | Type | Description |
-|---|---|---|
-| `account` | VARCHAR | Offer owner |
-| `sequence` | BIGINT | Offer sequence (unique per account) |
-| `taker_gets_currency` | VARCHAR | Currency the maker gives |
-| `taker_gets_issuer` | VARCHAR | Issuer for taker_gets (NULL = XRP) |
-| `taker_gets_value` | TEXT | Amount the maker gives |
-| `taker_pays_currency` | VARCHAR | Currency the maker wants |
-| `taker_pays_issuer` | VARCHAR | Issuer for taker_pays (NULL = XRP) |
-| `taker_pays_value` | TEXT | Amount the maker wants |
-| `quality` | TEXT | Exchange rate (taker_pays / taker_gets) |
-| `flags` | BIGINT | Offer flags |
-| `expiry_iso` | TEXT | Expiry time (ISO-8601, if set) |
-| `ledger_index` | BIGINT | Ledger of last update |
-
----
-
 ## API Endpoints
 
 Base URL: `http://your-server:8000` — interactive docs at `/docs`
@@ -384,6 +297,93 @@ Ordered stream of transactions for external sync clients. Use `next_cursor` to p
   "data": [{ "id": 1, "ledger_index": 95000000, "transaction_hash": "...", ... }]
 }
 ```
+
+---
+
+## Database Schema
+
+### `indexer_state` (single row)
+| Column | Type | Description |
+|---|---|---|
+| `id` | INTEGER | Always 1 — enforced by CHECK constraint |
+| `last_processed_ledger_index` | BIGINT | Resume point on restart |
+| `updated_at` | TIMESTAMP | Last update time |
+
+### `transactions`
+| Column | Type | Description |
+|---|---|---|
+| `id` | SERIAL | Primary key |
+| `ledger_index` | BIGINT | Ledger containing this transaction |
+| `transaction_hash` | VARCHAR | Unique hash |
+| `transaction_type` | VARCHAR | Payment, OfferCreate, TrustSet, etc. |
+| `account` | VARCHAR | Source account |
+| `destination` | VARCHAR | Destination account (if any) |
+| `amount` | TEXT | Amount (drops for XRP, JSON for IOU) |
+| `fee` | VARCHAR | Transaction fee in drops |
+| `source_tag` | BIGINT | Source tag (if present) |
+| `destination_tag` | BIGINT | Destination tag (if present) |
+| `transaction_data` | JSONB/JSON | Full raw transaction + metadata |
+| `created_at` | TIMESTAMP | When stored |
+
+### `ledger_metadata`
+| Column | Type | Description |
+|---|---|---|
+| `ledger_index` | BIGINT | Primary key |
+| `close_time_iso` | TEXT | Ledger close time (ISO-8601) |
+| `stored_at` | TIMESTAMP | When recorded |
+
+Written for **every processed ledger** regardless of filters. Powers `/ledgers/resolve`.
+
+### `tracked_wallets`
+| Column | Type | Description |
+|---|---|---|
+| `address` | VARCHAR | Wallet address |
+| `activation_tx_hash` | VARCHAR | Hash of the funding transaction |
+| `activated_at` | TIMESTAMP | When discovered |
+
+### `account_states`
+| Column | Type | Description |
+|---|---|---|
+| `address` | VARCHAR | Primary key |
+| `balance_drops` | BIGINT | XRP balance in drops |
+| `sequence` | BIGINT | Account sequence number |
+| `owner_count` | INT | Number of owned objects |
+| `flags` | BIGINT | Account flags bitmask |
+| `ledger_index` | BIGINT | Ledger of last update |
+| `updated_at` | TIMESTAMP | When last updated |
+
+### `trustlines`
+| Column | Type | Description |
+|---|---|---|
+| `account` | VARCHAR | Account holding the trust line |
+| `issuer` | VARCHAR | Token issuer |
+| `currency` | VARCHAR | Currency code |
+| `balance` | TEXT | Current balance |
+| `limit_amount` | TEXT | Trust limit set by account |
+| `limit_peer` | TEXT | Trust limit set by issuer |
+| `authorized` | BOOLEAN | Whether account is authorized |
+| `peer_authorized` | BOOLEAN | Whether issuer is authorized |
+| `no_ripple` | BOOLEAN | No-ripple flag |
+| `no_ripple_peer` | BOOLEAN | Peer no-ripple flag |
+| `freeze_flag` | BOOLEAN | Freeze flag |
+| `peer_freeze_flag` | BOOLEAN | Peer freeze flag |
+| `is_deleted` | BOOLEAN | True if removed via DeletedNode |
+
+### `offers`
+| Column | Type | Description |
+|---|---|---|
+| `account` | VARCHAR | Offer owner |
+| `sequence` | BIGINT | Offer sequence (unique per account) |
+| `taker_gets_currency` | VARCHAR | Currency the maker gives |
+| `taker_gets_issuer` | VARCHAR | Issuer for taker_gets (NULL = XRP) |
+| `taker_gets_value` | TEXT | Amount the maker gives |
+| `taker_pays_currency` | VARCHAR | Currency the maker wants |
+| `taker_pays_issuer` | VARCHAR | Issuer for taker_pays (NULL = XRP) |
+| `taker_pays_value` | TEXT | Amount the maker wants |
+| `quality` | TEXT | Exchange rate (taker_pays / taker_gets) |
+| `flags` | BIGINT | Offer flags |
+| `expiry_iso` | TEXT | Expiry time (ISO-8601, if set) |
+| `ledger_index` | BIGINT | Ledger of last update |
 
 ---
 
