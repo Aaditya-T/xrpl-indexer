@@ -195,29 +195,39 @@ class XRPLIndexer:
         return stored_count
 
     def process_ledgers_parallel(self, ledgers_to_process: list) -> int:
-        """Process multiple ledgers in parallel using ThreadPoolExecutor."""
+        """Process multiple ledgers in parallel using ThreadPoolExecutor.
+
+        Ledgers are processed in fixed-size batches so memory usage stays
+        bounded regardless of backlog size.  Only PARALLEL_WORKERS ledgers
+        are in-flight (fetched + held in memory) at any one time.
+        """
+        BATCH_SIZE = max(Config.PARALLEL_WORKERS * 4, 20)
+
         total_stored = 0
         completed = 0
         total_ledgers = len(ledgers_to_process)
         failed_ledgers = []
 
-        with ThreadPoolExecutor(max_workers=Config.PARALLEL_WORKERS) as executor:
-            future_to_ledger = {
-                executor.submit(self.process_ledger, ledger_index): ledger_index
-                for ledger_index in ledgers_to_process
-            }
+        for batch_start in range(0, total_ledgers, BATCH_SIZE):
+            batch = ledgers_to_process[batch_start:batch_start + BATCH_SIZE]
 
-            for future in as_completed(future_to_ledger):
-                ledger_index = future_to_ledger[future]
-                try:
-                    stored = future.result()
-                    total_stored += stored
-                    completed += 1
-                    if completed % 10 == 0 or completed == total_ledgers:
-                        print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
-                except Exception as e:
-                    print(f"Error processing ledger {ledger_index}: {e}")
-                    failed_ledgers.append((ledger_index, str(e)))
+            with ThreadPoolExecutor(max_workers=Config.PARALLEL_WORKERS) as executor:
+                future_to_ledger = {
+                    executor.submit(self.process_ledger, ledger_index): ledger_index
+                    for ledger_index in batch
+                }
+
+                for future in as_completed(future_to_ledger):
+                    ledger_index = future_to_ledger[future]
+                    try:
+                        stored = future.result()
+                        total_stored += stored
+                        completed += 1
+                        if completed % 10 == 0 or completed == total_ledgers:
+                            print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
+                    except Exception as e:
+                        print(f"Error processing ledger {ledger_index}: {e}")
+                        failed_ledgers.append((ledger_index, str(e)))
 
         if failed_ledgers:
             raise Exception(
