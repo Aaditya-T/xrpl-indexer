@@ -173,6 +173,7 @@ class Holder(_Base):
     balance: Optional[str] = None
     limit_amount: Optional[str] = None
     authorized: Optional[bool] = None
+    peer_authorized: Optional[bool] = None
     freeze_flag: Optional[bool] = None
     no_ripple: Optional[bool] = None
 
@@ -596,7 +597,7 @@ def token_holders(
 
     with get_cursor() as cur:
         query = (
-            f"SELECT account, balance, limit_amount, authorized, freeze_flag, no_ripple "
+            f"SELECT account, balance, limit_amount, authorized, peer_authorized, freeze_flag, no_ripple "
             f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE "
             f"AND balance != {ph} AND balance != {ph}"
         )
