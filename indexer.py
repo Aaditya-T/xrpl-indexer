@@ -185,6 +185,8 @@ class XRPLIndexer:
                 self.state_processor.process_transaction(tx_data, ledger_index)
             except Exception as exc:
                 print(f"[StateProcessor] error on tx {tx_hash}: {exc}")
+                if hasattr(self.db, "is_connection_error") and self.db.is_connection_error(exc):
+                    raise
 
             # --- Transaction storage: controlled by configured filters ---
             if self.should_include_transaction(tx_data):
@@ -227,12 +229,15 @@ class XRPLIndexer:
                             print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
                     except Exception as e:
                         print(f"Error processing ledger {ledger_index}: {e}")
-                        failed_ledgers.append((ledger_index, str(e)))
+                        failed_ledgers.append((ledger_index, e))
 
         if failed_ledgers:
+            for _, error in failed_ledgers:
+                if hasattr(self.db, "is_connection_error") and self.db.is_connection_error(error):
+                    raise error
             raise Exception(
                 f"Failed to process {len(failed_ledgers)} ledger(s): "
-                f"{', '.join(str(l[0]) for l in failed_ledgers)}"
+                f"{', '.join(str(ledger_index) for ledger_index, _ in failed_ledgers)}"
             )
         return total_stored
 
@@ -242,52 +247,71 @@ class XRPLIndexer:
 
     def run_indexing_cycle(self):
         """Run a single indexing cycle."""
-        try:
-            current_ledger_index = self.xrpl_client.get_current_ledger_index()
-            print(f"\nCurrent ledger index: {current_ledger_index}")
+        for attempt in range(2):
+            try:
+                self._run_indexing_cycle_once()
+                return
+            except Exception as e:
+                is_db_connection_error = (
+                    hasattr(self.db, "is_connection_error")
+                    and self.db.is_connection_error(e)
+                )
+                if is_db_connection_error and attempt == 0:
+                    print(f"Database connection error during indexing cycle: {e}")
+                    print("Reconnecting to database and retrying cycle once...")
+                    self.db.reconnect()
+                    continue
 
-            last_processed = self.db.get_last_processed_ledger_index()
-
-            if last_processed is None:
-                print("First run detected. Storing current ledger index and waiting for next cycle...")
-                self.db.update_last_processed_ledger_index(current_ledger_index)
-                print(f"Stored ledger index: {current_ledger_index}")
+                print(f"Error during indexing cycle: {e}")
+                import traceback
+                traceback.print_exc()
                 return
 
-            print(f"Last processed ledger index: {last_processed}")
+    def _run_indexing_cycle_once(self):
+        """Run one indexing attempt. Exceptions are handled by run_indexing_cycle."""
+        if hasattr(self.db, "ensure_connection"):
+            self.db.ensure_connection()
 
-            if current_ledger_index <= last_processed:
-                print("No new ledgers to process.")
-                return
+        current_ledger_index = self.xrpl_client.get_current_ledger_index()
+        print(f"\nCurrent ledger index: {current_ledger_index}")
 
-            ledgers_to_process = list(range(last_processed + 1, current_ledger_index + 1))
-            total_ledgers = len(ledgers_to_process)
-            print(f"Processing {total_ledgers} ledgers ({last_processed + 1} to {current_ledger_index})...")
+        last_processed = self.db.get_last_processed_ledger_index()
 
-            if Config.ENABLE_PARALLEL_PROCESSING:
-                print(f"Using parallel processing with {Config.PARALLEL_WORKERS} workers")
-                total_stored = self.process_ledgers_parallel(ledgers_to_process)
-            else:
-                total_stored = 0
-                for i, ledger_index in enumerate(ledgers_to_process, 1):
-                    stored = self.process_ledger(ledger_index)
-                    total_stored += stored
-                    if i % 10 == 0 or i == total_ledgers:
-                        print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
-                    if i < total_ledgers:
-                        time.sleep(0.1)
-
+        if last_processed is None:
+            print("First run detected. Storing current ledger index and waiting for next cycle...")
             self.db.update_last_processed_ledger_index(current_ledger_index)
+            print(f"Stored ledger index: {current_ledger_index}")
+            return
 
-            print("\nIndexing cycle complete!")
-            print(f"Processed ledgers: {last_processed + 1} to {current_ledger_index}")
-            print(f"Total transactions stored: {total_stored}")
-            print(f"Total transactions in database: {self.db.get_transaction_count()}")
+        print(f"Last processed ledger index: {last_processed}")
 
-        except Exception as e:
-            print(f"Error during indexing cycle: {e}")
-            import traceback
-            traceback.print_exc()
+        if current_ledger_index <= last_processed:
+            print("No new ledgers to process.")
+            return
+
+        ledgers_to_process = list(range(last_processed + 1, current_ledger_index + 1))
+        total_ledgers = len(ledgers_to_process)
+        print(f"Processing {total_ledgers} ledgers ({last_processed + 1} to {current_ledger_index})...")
+
+        if Config.ENABLE_PARALLEL_PROCESSING:
+            print(f"Using parallel processing with {Config.PARALLEL_WORKERS} workers")
+            total_stored = self.process_ledgers_parallel(ledgers_to_process)
+        else:
+            total_stored = 0
+            for i, ledger_index in enumerate(ledgers_to_process, 1):
+                stored = self.process_ledger(ledger_index)
+                total_stored += stored
+                if i % 10 == 0 or i == total_ledgers:
+                    print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
+                if i < total_ledgers:
+                    time.sleep(0.1)
+
+        self.db.update_last_processed_ledger_index(current_ledger_index)
+
+        print("\nIndexing cycle complete!")
+        print(f"Processed ledgers: {last_processed + 1} to {current_ledger_index}")
+        print(f"Total transactions stored: {total_stored}")
+        print(f"Total transactions in database: {self.db.get_transaction_count()}")
 
     def close(self):
         self.db.close()

@@ -4,8 +4,41 @@ import psycopg2.extensions
 from psycopg2.extras import RealDictCursor
 import sqlite3
 import json
+import threading
 from typing import Optional, List, Dict, Any, Union
 from config import Config
+
+
+DBConnectionErrors = (
+    psycopg2.InterfaceError,
+    psycopg2.OperationalError,
+    sqlite3.InterfaceError,
+    sqlite3.OperationalError,
+    sqlite3.ProgrammingError,
+)
+
+
+class LockedCursor:
+    """Cursor wrapper that holds the database lock until the cursor is closed."""
+
+    def __init__(self, cursor, lock: threading.RLock):
+        self._cursor = cursor
+        self._lock = lock
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+    def close(self):
+        if self._closed:
+            return
+        try:
+            self._cursor.close()
+        except Exception:
+            pass
+        finally:
+            self._closed = True
+            self._lock.release()
 
 
 class Database:
@@ -18,7 +51,8 @@ class Database:
     ):
         self.db_type = db_type or Config.DATABASE_TYPE
         self._db_url = db_url or Config.DATABASE_URL
-        self.conn: Union[psycopg2.extensions.connection, sqlite3.Connection]
+        self.conn: Optional[Union[psycopg2.extensions.connection, sqlite3.Connection]] = None
+        self._lock = threading.RLock()
         self._tracked_wallets_cache: set[str] = set()
         self.connect()
         self.create_tables()
@@ -26,12 +60,70 @@ class Database:
 
     def connect(self):
         """Establish database connection"""
+        with self._lock:
+            if self.db_type == "postgresql":
+                self.conn = psycopg2.connect(self._db_url, cursor_factory=RealDictCursor)
+            else:
+                db_path = self._db_url.replace("sqlite:///", "")
+                self.conn = sqlite3.connect(db_path, check_same_thread=False)
+                self.conn.row_factory = sqlite3.Row
+
+    def _connection_is_closed(self) -> bool:
+        if self.conn is None:
+            return True
         if self.db_type == "postgresql":
-            self.conn = psycopg2.connect(self._db_url, cursor_factory=RealDictCursor)
-        else:
-            db_path = self._db_url.replace("sqlite:///", "")
-            self.conn = sqlite3.connect(db_path, check_same_thread=False)
-            self.conn.row_factory = sqlite3.Row
+            return bool(self.conn.closed)
+        try:
+            cursor = self.conn.execute("SELECT 1")
+            cursor.close()
+            return False
+        except DBConnectionErrors:
+            return True
+
+    def ensure_connection(self):
+        """Reconnect if the database handle was closed by the server or app."""
+        with self._lock:
+            if self._connection_is_closed():
+                print("[Database] Connection is closed; reconnecting...")
+                self.connect()
+            return self.conn
+
+    def reconnect(self):
+        """Force a fresh database connection after a connection-level failure."""
+        with self._lock:
+            if self.conn is not None:
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+            self.connect()
+
+    def is_connection_error(self, error: Exception) -> bool:
+        return isinstance(error, DBConnectionErrors)
+
+    def _cursor(self):
+        self._lock.acquire()
+        try:
+            conn = self.ensure_connection()
+            return LockedCursor(conn.cursor(), self._lock)
+        except Exception:
+            self._lock.release()
+            raise
+
+    def _commit(self):
+        try:
+            self.ensure_connection().commit()
+        except DBConnectionErrors:
+            self.reconnect()
+            raise
+
+    def _rollback(self):
+        try:
+            if self.conn is not None and not self._connection_is_closed():
+                self.conn.rollback()
+        except DBConnectionErrors:
+            self.reconnect()
 
     # ------------------------------------------------------------------
     # Table creation
@@ -39,15 +131,16 @@ class Database:
 
     def create_tables(self):
         """Create necessary tables if they don't exist"""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
+        try:
+            if self.db_type == "postgresql":
+                self._create_tables_pg(cursor)
+            else:
+                self._create_tables_sqlite(cursor)
 
-        if self.db_type == "postgresql":
-            self._create_tables_pg(cursor)
-        else:
-            self._create_tables_sqlite(cursor)
-
-        self.conn.commit()
-        cursor.close()
+            self._commit()
+        finally:
+            cursor.close()
 
     def _create_tables_pg(self, cursor):
         cursor.execute("""
@@ -261,10 +354,12 @@ class Database:
 
     def _load_tracked_wallets_cache(self):
         """Load all tracked wallet addresses into memory."""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT address FROM tracked_wallets")
-        rows = cursor.fetchall()
-        cursor.close()
+        cursor = self._cursor()
+        try:
+            cursor.execute("SELECT address FROM tracked_wallets")
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
         if self.db_type == "postgresql":
             self._tracked_wallets_cache = {r["address"] for r in rows}
         else:
@@ -278,7 +373,7 @@ class Database:
         """Add a wallet to tracking. Returns True if it was newly added."""
         if address in self._tracked_wallets_cache:
             return False
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -292,12 +387,14 @@ class Database:
                     "VALUES (?, ?)",
                     (address, tx_hash),
                 )
-            self.conn.commit()
+            self._commit()
             self._tracked_wallets_cache.add(address)
             return True
         except Exception as e:
             print(f"Error adding tracked wallet {address}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
             return False
         finally:
             cursor.close()
@@ -312,34 +409,36 @@ class Database:
         Returns address, tx_hash, and transaction_data so callers can inspect
         AffectedNodes for AccountRoot creation (the definitive activation signal).
         """
-        cursor = self.conn.cursor()
-        if self.db_type == "postgresql":
-            cursor.execute(
-                "SELECT DISTINCT ON (destination) destination, transaction_hash, transaction_data "
-                "FROM transactions "
-                "WHERE account = %s AND transaction_type = 'Payment' AND destination IS NOT NULL "
-                "ORDER BY destination, ledger_index ASC",
-                (central_wallet,),
-            )
-        else:
-            # SQLite: use a CTE to deterministically select the earliest tx per destination.
-            # A bare GROUP BY would pick an arbitrary row for transaction_hash / transaction_data.
-            cursor.execute(
-                "WITH earliest AS ("
-                "  SELECT destination, MIN(ledger_index) AS min_li"
-                "  FROM transactions"
-                "  WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL"
-                "  GROUP BY destination"
-                ")"
-                "SELECT t.destination, t.transaction_hash, t.transaction_data"
-                " FROM transactions t"
-                " JOIN earliest ON t.destination = earliest.destination"
-                "              AND t.ledger_index = earliest.min_li"
-                " WHERE t.account = ? AND t.transaction_type = 'Payment'",
-                (central_wallet, central_wallet),
-            )
-        rows = cursor.fetchall()
-        cursor.close()
+        cursor = self._cursor()
+        try:
+            if self.db_type == "postgresql":
+                cursor.execute(
+                    "SELECT DISTINCT ON (destination) destination, transaction_hash, transaction_data "
+                    "FROM transactions "
+                    "WHERE account = %s AND transaction_type = 'Payment' AND destination IS NOT NULL "
+                    "ORDER BY destination, ledger_index ASC",
+                    (central_wallet,),
+                )
+            else:
+                # SQLite: use a CTE to deterministically select the earliest tx per destination.
+                # A bare GROUP BY would pick an arbitrary row for transaction_hash / transaction_data.
+                cursor.execute(
+                    "WITH earliest AS ("
+                    "  SELECT destination, MIN(ledger_index) AS min_li"
+                    "  FROM transactions"
+                    "  WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL"
+                    "  GROUP BY destination"
+                    ")"
+                    "SELECT t.destination, t.transaction_hash, t.transaction_data"
+                    " FROM transactions t"
+                    " JOIN earliest ON t.destination = earliest.destination"
+                    "              AND t.ledger_index = earliest.min_li"
+                    " WHERE t.account = ? AND t.transaction_type = 'Payment'",
+                    (central_wallet, central_wallet),
+                )
+            rows = cursor.fetchall()
+        finally:
+            cursor.close()
         if self.db_type == "postgresql":
             return [
                 {"address": r["destination"], "tx_hash": r["transaction_hash"], "transaction_data": r["transaction_data"]}
@@ -353,7 +452,7 @@ class Database:
 
     def upsert_ledger_metadata(self, ledger_index: int, close_time_iso: str) -> None:
         """Store the close time for a ledger. Written for every processed ledger."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -367,10 +466,12 @@ class Database:
                     "VALUES (?, ?)",
                     (ledger_index, close_time_iso),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error storing ledger metadata for {ledger_index}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
@@ -387,7 +488,7 @@ class Database:
         ledger_index: int,
     ):
         """Upsert account state, only updating if ledger_index is newer."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -425,10 +526,12 @@ class Database:
                     """,
                     (address, balance_drops, sequence, owner_count, flags, ledger_index),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error upserting account state for {address}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
@@ -454,7 +557,7 @@ class Database:
         ledger_index: int,
     ):
         """Upsert a trustline row, only updating if ledger_index is newer."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             a = int(authorized)
             p_a = int(peer_authorized)
@@ -519,16 +622,18 @@ class Database:
                     (account, issuer, currency, balance, limit_amount, limit_peer,
                      a, p_a, nr, nr_p, fr, fr_p, d, ledger_index),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error upserting trustline {account}/{issuer}/{currency}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
     def delete_trustline(self, account: str, issuer: str, currency: str) -> None:
         """Hard-delete a trust line row when the ledger removes it."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -540,10 +645,12 @@ class Database:
                     "DELETE FROM trustlines WHERE account = ? AND issuer = ? AND currency = ?",
                     (account, issuer, currency),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error deleting trustline {account}/{issuer}/{currency}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
@@ -567,7 +674,7 @@ class Database:
         ledger_index: int,
     ):
         """Upsert an open offer."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -623,16 +730,18 @@ class Database:
                      taker_pays_currency, taker_pays_issuer, taker_pays_value,
                      expiry_iso, flags, quality, ledger_index),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error upserting offer {account}/{sequence}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
     def delete_offer(self, account: str, sequence: int):
         """Remove a fully-filled or cancelled offer."""
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -644,10 +753,12 @@ class Database:
                     "DELETE FROM offers WHERE account = ? AND sequence = ?",
                     (account, sequence),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error deleting offer {account}/{sequence}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
@@ -656,10 +767,12 @@ class Database:
     # ------------------------------------------------------------------
 
     def get_last_processed_ledger_index(self) -> Optional[int]:
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT last_processed_ledger_index FROM indexer_state WHERE id = 1")
-        result = cursor.fetchone()
-        cursor.close()
+        cursor = self._cursor()
+        try:
+            cursor.execute("SELECT last_processed_ledger_index FROM indexer_state WHERE id = 1")
+            result = cursor.fetchone()
+        finally:
+            cursor.close()
         if result:
             if self.db_type == "sqlite":
                 return result[0]  # type: ignore
@@ -668,7 +781,7 @@ class Database:
         return None
 
     def update_last_processed_ledger_index(self, ledger_index: int):
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
@@ -686,12 +799,12 @@ class Database:
                     "updated_at = CURRENT_TIMESTAMP",
                     (ledger_index,),
                 )
-            self.conn.commit()
+            self._commit()
         finally:
             cursor.close()
 
     def insert_transaction(self, tx_data: Dict[str, Any]):
-        cursor = self.conn.cursor()
+        cursor = self._cursor()
         ledger_index = tx_data.get("ledger_index")
         tx_hash = tx_data.get("hash")
         tx_type = tx_data.get("TransactionType")
@@ -725,22 +838,28 @@ class Database:
                     (ledger_index, tx_hash, tx_type, account, destination,
                      amount, fee, source_tag, destination_tag, json.dumps(tx_data)),
                 )
-            self.conn.commit()
+            self._commit()
         except Exception as e:
             print(f"Error inserting transaction {tx_hash}: {e}")
-            self.conn.rollback()
+            self._rollback()
+            if self.is_connection_error(e):
+                raise
         finally:
             cursor.close()
 
     def get_transaction_count(self) -> int:
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT COUNT(*) as count FROM transactions")
-        result = cursor.fetchone()
-        cursor.close()
+        cursor = self._cursor()
+        try:
+            cursor.execute("SELECT COUNT(*) as count FROM transactions")
+            result = cursor.fetchone()
+        finally:
+            cursor.close()
         if not result:
             return 0
         return result[0] if self.db_type == "sqlite" else result["count"]  # type: ignore
 
     def close(self):
-        if self.conn:
-            self.conn.close()
+        with self._lock:
+            if self.conn:
+                self.conn.close()
+                self.conn = None
