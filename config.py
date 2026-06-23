@@ -26,11 +26,25 @@ def _build_database_url() -> str:
     return f"postgresql://{user}:{password}@{host}:{port}/{name}"
 
 
+def _database_type_for_url(db_url: str) -> str:
+    if db_url.startswith("sqlite:///"):
+        return "sqlite"
+    if db_url.startswith(("postgresql://", "postgres://")):
+        return "postgresql"
+    configured_type = os.getenv("DATABASE_TYPE")
+    if configured_type:
+        return configured_type
+    return "postgresql"
+
+
+_DATABASE_URL = _build_database_url()
+
+
 class Config:
     XRPL_JSON_RPC_URL = os.getenv("XRPL_JSON_RPC_URL", "https://s1.ripple.com:51234/")
 
-    DATABASE_TYPE = os.getenv("DATABASE_TYPE", "postgresql")
-    DATABASE_URL = _build_database_url()
+    DATABASE_URL = _DATABASE_URL
+    DATABASE_TYPE = _database_type_for_url(_DATABASE_URL)
 
     CRON_INTERVAL_MINUTES = int(os.getenv("CRON_INTERVAL_MINUTES", "5"))
 

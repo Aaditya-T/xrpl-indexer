@@ -185,8 +185,7 @@ class XRPLIndexer:
                 self.state_processor.process_transaction(tx_data, ledger_index)
             except Exception as exc:
                 print(f"[StateProcessor] error on tx {tx_hash}: {exc}")
-                if hasattr(self.db, "is_connection_error") and self.db.is_connection_error(exc):
-                    raise
+                raise
 
             # --- Transaction storage: controlled by configured filters ---
             if self.should_include_transaction(tx_data):

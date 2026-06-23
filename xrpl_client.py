@@ -38,11 +38,10 @@ class XRPLClient:
                 transactions = response.result.get('ledger', {}).get('transactions', [])
                 return transactions if transactions else []
             else:
-                print(f"Failed to get ledger {ledger_index}: {response.result}")
-                return []
+                raise Exception(f"Failed to get ledger {ledger_index}: {response.result}")
         except Exception as e:
             print(f"Error getting ledger {ledger_index} transactions: {e}")
-            return []
+            raise
     
     def get_transaction(self, tx_hash: str) -> Optional[Dict[str, Any]]:
         """Get detailed transaction information"""
@@ -56,11 +55,10 @@ class XRPLClient:
                     tx_data['hash'] = tx_hash
                 return tx_data
             else:
-                print(f"Failed to get transaction {tx_hash}: {response.result}")
-                return None
+                raise Exception(f"Failed to get transaction {tx_hash}: {response.result}")
         except Exception as e:
             print(f"Error getting transaction {tx_hash}: {e}")
-            return None
+            raise
     
     def get_ledger_with_transactions(
         self, ledger_index: int
@@ -95,8 +93,7 @@ class XRPLClient:
 
                 return transactions if transactions else [], close_time_iso
             else:
-                print(f"Failed to get ledger {ledger_index} with transactions: {response.result}")
-                return [], None
+                raise Exception(f"Failed to get ledger {ledger_index} with transactions: {response.result}")
         except Exception as e:
             print(f"Error getting ledger {ledger_index} with transactions: {e}")
-            return [], None
+            raise

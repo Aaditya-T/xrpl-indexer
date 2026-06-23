@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Any, Generator, Optional
 
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -333,6 +334,18 @@ def _ph() -> str:
     return "%s" if Config.DATABASE_TYPE == "postgresql" else "?"
 
 
+def _numeric_expr(column: str) -> str:
+    cast_type = "NUMERIC" if Config.DATABASE_TYPE == "postgresql" else "REAL"
+    return f"CAST({column} AS {cast_type})"
+
+
+def _decimal_to_text(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
 # ---------------------------------------------------------------------------
 # Health / Status
 # ---------------------------------------------------------------------------
@@ -606,7 +619,7 @@ def token_holders(
             placeholders = ", ".join([ph] * len(exclude))
             query += f" AND account NOT IN ({placeholders})"
             params.extend(exclude)
-        query += " ORDER BY CAST(balance AS FLOAT) DESC"
+        query += f" ORDER BY {_numeric_expr('balance')} DESC"
         cur.execute(query, params)
         rows = rows_to_list(cur.fetchall())
 
@@ -649,7 +662,7 @@ def orderbook(
         cur.execute(
             f"SELECT account, sequence, taker_gets_value, taker_pays_value, "
             f"expiry_iso, flags, quality, ledger_index "
-            f"FROM offers {where} ORDER BY CAST(quality AS FLOAT) ASC LIMIT {ph}",
+            f"FROM offers {where} ORDER BY {_numeric_expr('quality')} ASC LIMIT {ph}",
             params + [limit],
         )
         rows = rows_to_list(cur.fetchall())
@@ -686,13 +699,13 @@ def _subtract_amounts(prev: Any, final: Any) -> Any:
             return "0"
     if isinstance(prev, dict) and isinstance(final, dict):
         try:
-            delta = float(prev.get("value", 0)) - float(final.get("value", 0))
-        except (ValueError, TypeError):
-            delta = 0.0
+            delta = Decimal(str(prev.get("value", 0))) - Decimal(str(final.get("value", 0)))
+        except (InvalidOperation, ValueError, TypeError):
+            delta = Decimal("0")
         return {
             "currency": prev.get("currency") or final.get("currency"),
             "issuer": prev.get("issuer") or final.get("issuer"),
-            "value": str(delta),
+            "value": _decimal_to_text(delta),
         }
     return None
 
@@ -918,13 +931,21 @@ def list_tracked_wallets(
 # Sync (existing)
 # ---------------------------------------------------------------------------
 
-def _encode_cursor(row_id: int) -> str:
-    return base64.urlsafe_b64encode(str(row_id).encode()).decode()
+def _encode_cursor(ledger_index: int, row_id: int) -> str:
+    payload = {"ledger_index": ledger_index, "id": row_id}
+    return base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode()
 
 
-def _decode_cursor(cursor: str) -> int:
+def _decode_cursor(cursor: str) -> tuple[Optional[int], int]:
     try:
-        return int(base64.urlsafe_b64decode(cursor.encode()).decode())
+        decoded = base64.urlsafe_b64decode(cursor.encode()).decode()
+        try:
+            payload = json.loads(decoded)
+        except ValueError:
+            return None, int(decoded)
+        if not isinstance(payload, dict):
+            return None, int(payload)
+        return int(payload["ledger_index"]), int(payload["id"])
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid cursor value")
 
@@ -980,7 +1001,13 @@ def sync_transactions(
     params: list[Any] = []
 
     if cursor:
-        conditions.append(f"id > {ph}"); params.append(_decode_cursor(cursor))
+        cursor_ledger, cursor_id = _decode_cursor(cursor)
+        if cursor_ledger is None:
+            conditions.append(f"id > {ph}")
+            params.append(cursor_id)
+        else:
+            conditions.append(f"(ledger_index > {ph} OR (ledger_index = {ph} AND id > {ph}))")
+            params += [cursor_ledger, cursor_ledger, cursor_id]
     elif after_ledger is not None:
         conditions.append(f"ledger_index > {ph}"); params.append(after_ledger)
 
@@ -991,12 +1018,17 @@ def sync_transactions(
             f"SELECT id, ledger_index, transaction_hash, transaction_type, "
             f"account, destination, fee, source_tag, destination_tag, created_at, transaction_data "
             f"FROM transactions {where} ORDER BY ledger_index ASC, id ASC LIMIT {ph}",
-            params + [limit],
+            params + [limit + 1],
         )
         rows = rows_to_list(cur.fetchall())
 
-    data = [_extract_tx_fields(r, include_full) for r in rows]
-    has_more = len(rows) == limit
-    next_cursor = _encode_cursor(rows[-1]["id"]) if has_more and rows else None
+    page_rows = rows[:limit]
+    data = [_extract_tx_fields(r, include_full) for r in page_rows]
+    has_more = len(rows) > limit
+    next_cursor = (
+        _encode_cursor(page_rows[-1]["ledger_index"], page_rows[-1]["id"])
+        if has_more and page_rows
+        else None
+    )
 
     return {"has_more": has_more, "next_cursor": next_cursor, "count": len(data), "data": data}

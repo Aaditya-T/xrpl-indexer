@@ -631,19 +631,23 @@ class Database:
         finally:
             cursor.close()
 
-    def delete_trustline(self, account: str, issuer: str, currency: str) -> None:
+    def delete_trustline(self, account: str, issuer: str, currency: str, ledger_index: int) -> None:
         """Hard-delete a trust line row when the ledger removes it."""
         cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
-                    "DELETE FROM trustlines WHERE account = %s AND issuer = %s AND currency = %s",
-                    (account, issuer, currency),
+                    "DELETE FROM trustlines "
+                    "WHERE account = %s AND issuer = %s AND currency = %s "
+                    "AND (ledger_index IS NULL OR ledger_index <= %s)",
+                    (account, issuer, currency, ledger_index),
                 )
             else:
                 cursor.execute(
-                    "DELETE FROM trustlines WHERE account = ? AND issuer = ? AND currency = ?",
-                    (account, issuer, currency),
+                    "DELETE FROM trustlines "
+                    "WHERE account = ? AND issuer = ? AND currency = ? "
+                    "AND (ledger_index IS NULL OR ledger_index <= ?)",
+                    (account, issuer, currency, ledger_index),
                 )
             self._commit()
         except Exception as e:
@@ -739,19 +743,23 @@ class Database:
         finally:
             cursor.close()
 
-    def delete_offer(self, account: str, sequence: int):
+    def delete_offer(self, account: str, sequence: int, ledger_index: int):
         """Remove a fully-filled or cancelled offer."""
         cursor = self._cursor()
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
-                    "DELETE FROM offers WHERE account = %s AND sequence = %s",
-                    (account, sequence),
+                    "DELETE FROM offers "
+                    "WHERE account = %s AND sequence = %s "
+                    "AND (ledger_index IS NULL OR ledger_index <= %s)",
+                    (account, sequence, ledger_index),
                 )
             else:
                 cursor.execute(
-                    "DELETE FROM offers WHERE account = ? AND sequence = ?",
-                    (account, sequence),
+                    "DELETE FROM offers "
+                    "WHERE account = ? AND sequence = ? "
+                    "AND (ledger_index IS NULL OR ledger_index <= ?)",
+                    (account, sequence, ledger_index),
                 )
             self._commit()
         except Exception as e:

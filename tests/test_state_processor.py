@@ -107,12 +107,18 @@ class MockDB:
             "ledger_index": ledger_index,
         }
 
-    def delete_trustline(self, account: str, issuer: str, currency: str):
+    def delete_trustline(self, account: str, issuer: str, currency: str, ledger_index: int):
         key = (account, issuer, currency)
+        existing = self.trustlines.get(key)
+        if existing and (existing.get("ledger_index") or 0) > ledger_index:
+            return
         self.trustlines.pop(key, None)
 
-    def delete_offer(self, account: str, sequence: int):
+    def delete_offer(self, account: str, sequence: int, ledger_index: int):
         key = (account, sequence)
+        existing = self.offers.get(key)
+        if existing and (existing.get("ledger_index") or 0) > ledger_index:
+            return
         self.offers.pop(key, None)
         self.deleted_offers.add(key)
 
@@ -441,7 +447,7 @@ class TestRippleState:
         assert tl["limit_amount"] == "1000"   # USER_A's limit (low)
         assert tl["limit_peer"] == "0"        # GATEWAY's limit (high)
         assert tl["is_deleted"] is False
-        assert tl["balance"] == "0.0"
+        assert tl["balance"] == "0"
 
     def test_trustline_balance_change(self):
         db = MockDB(tracked={USER_A})
@@ -748,6 +754,22 @@ class TestOffer:
 # ---------------------------------------------------------------------------
 
 class TestMixed:
+    def test_state_processor_errors_abort_processing(self):
+        class FailingDB(MockDB):
+            def upsert_account_state(self, *args, **kwargs):
+                raise RuntimeError("write failed")
+
+        db = FailingDB(tracked={USER_A})
+        sp = StateProcessor(db)
+        tx = _make_tx([
+            _modified("AccountRoot",
+                final_fields={"Account": USER_A, "Balance": "7000000", "Sequence": 3,
+                               "OwnerCount": 0, "Flags": 0}),
+        ])
+
+        with pytest.raises(RuntimeError, match="write failed"):
+            sp.process_transaction(tx, ledger_index=5000)
+
     def test_mixed_transaction_updates_all_state_tables(self):
         """A single transaction can touch AccountRoot, RippleState, and Offer at once."""
         db = MockDB(tracked={USER_A})

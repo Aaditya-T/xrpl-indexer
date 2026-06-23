@@ -12,6 +12,7 @@ All other node types (DirectoryNode, FeeSettings, …) are silently skipped.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
@@ -35,6 +36,14 @@ def ripple_epoch_to_iso(ripple_ts: int) -> str:
     """Convert a Ripple-epoch timestamp (seconds since 2000-01-01) to ISO-8601."""
     unix_ts = ripple_ts + RIPPLE_EPOCH_OFFSET
     return datetime.fromtimestamp(unix_ts, tz=timezone.utc).isoformat()
+
+
+def decimal_to_text(value: Decimal) -> str:
+    """Render Decimal values without binary-float artifacts or needless zeroes."""
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 class StateProcessor:
@@ -69,10 +78,7 @@ class StateProcessor:
             return
 
         for node_wrapper in meta.get("AffectedNodes", []):
-            try:
-                self._dispatch_node(node_wrapper, ledger_index)
-            except Exception as exc:
-                print(f"[StateProcessor] error processing node {node_wrapper}: {exc}")
+            self._dispatch_node(node_wrapper, ledger_index)
 
     # ------------------------------------------------------------------
     # Node dispatch
@@ -156,9 +162,9 @@ class StateProcessor:
             raw_bv = str(balance_field)
 
         try:
-            balance_float = float(raw_bv)
-        except (ValueError, TypeError):
-            balance_float = 0.0
+            balance_decimal = Decimal(str(raw_bv))
+        except (InvalidOperation, ValueError, TypeError):
+            balance_decimal = Decimal("0")
 
         # Emit one row for each tracked account involved in this trust line.
         for account, is_high in ((high_account, True), (low_account, False)):
@@ -168,7 +174,7 @@ class StateProcessor:
             peer = low_account if is_high else high_account
 
             # Normalise balance to "I hold positive" from this account's view
-            acc_balance = str(-balance_float) if is_high else str(balance_float)
+            acc_balance = decimal_to_text(-balance_decimal if is_high else balance_decimal)
 
             if is_high:
                 limit_amount    = high_limit.get("value", "0")
@@ -190,7 +196,7 @@ class StateProcessor:
                 peer_freeze     = bool(flags & _LSF_HIGH_FREEZE)
 
             if deleted:
-                self.db.delete_trustline(account, peer, currency)
+                self.db.delete_trustline(account, peer, currency, ledger_index)
             else:
                 self.db.upsert_trustline(
                     account=account,
@@ -223,7 +229,7 @@ class StateProcessor:
 
         # Deleted (full fill or cancel) → remove from open offers
         if deleted:
-            self.db.delete_offer(account, int(sequence))
+            self.db.delete_offer(account, int(sequence), ledger_index)
             return
 
         # Still open (created or partially filled) → upsert remaining amounts
