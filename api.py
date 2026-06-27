@@ -611,10 +611,9 @@ def token_holders(
     with get_cursor() as cur:
         query = (
             f"SELECT account, balance, limit_amount, authorized, peer_authorized, freeze_flag, no_ripple "
-            f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE "
-            f"AND balance != {ph} AND balance != {ph}"
+            f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE"
         )
-        params: list[Any] = [issuer, currency, "0", "0.0"]
+        params: list[Any] = [issuer, currency]
         if exclude:
             placeholders = ", ".join([ph] * len(exclude))
             query += f" AND account NOT IN ({placeholders})"
