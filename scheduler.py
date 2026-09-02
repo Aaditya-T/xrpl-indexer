@@ -2,8 +2,10 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from indexer import XRPLIndexer
 from config import Config
+from observability import emit, process_memory_mb
 import signal
 import sys
+import time
 
 
 class IndexerScheduler:
@@ -12,6 +14,7 @@ class IndexerScheduler:
     def __init__(self):
         self.scheduler = BlockingScheduler()
         self.indexer = XRPLIndexer()
+        self.cycle_number = 0
         self.setup_signal_handlers()
     
     def setup_signal_handlers(self):
@@ -21,6 +24,7 @@ class IndexerScheduler:
     
     def shutdown(self, signum=None, frame=None):
         """Gracefully shutdown the scheduler"""
+        emit("indexer_shutdown", signal=signum, **process_memory_mb())
         print("\nShutting down indexer...")
         try:
             self.scheduler.shutdown(wait=False)
@@ -31,15 +35,43 @@ class IndexerScheduler:
     
     def run_indexer_job(self):
         """Job function to run indexing cycle"""
+        self.cycle_number += 1
+        started = time.monotonic()
+        starting_memory = process_memory_mb()
+        emit(
+            "indexing_cycle_started",
+            cycle=self.cycle_number,
+            rss_mb=starting_memory["rss_mb"],
+            peak_rss_mb=starting_memory["peak_rss_mb"],
+        )
         print(f"\n{'='*60}")
         print("Running scheduled indexing job...")
         print(f"{'='*60}")
-        self.indexer.run_indexing_cycle()
-        print(f"{'='*60}\n")
+        success = False
+        try:
+            success = self.indexer.run_indexing_cycle()
+        finally:
+            emit(
+                "indexing_cycle_finished",
+                level="info" if success else "error",
+                cycle=self.cycle_number,
+                outcome="success" if success else "failed",
+                duration_seconds=round(time.monotonic() - started, 3),
+                **process_memory_mb(),
+            )
+            print(f"{'='*60}\n")
     
     def start(self):
         """Start the scheduler with configured interval"""
         interval_minutes = Config.CRON_INTERVAL_MINUTES
+        emit(
+            "indexer_process_started",
+            interval_minutes=interval_minutes,
+            database_type=Config.DATABASE_TYPE,
+            parallel_processing=Config.ENABLE_PARALLEL_PROCESSING,
+            parallel_workers=Config.PARALLEL_WORKERS if Config.ENABLE_PARALLEL_PROCESSING else 0,
+            **process_memory_mb(),
+        )
         
         print("XRPL Indexer Scheduler Started")
         print(f"{'='*60}")

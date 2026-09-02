@@ -401,20 +401,87 @@ pip install -r requirements.txt   # or: uv sync
 cp .env.example .env
 nano .env
 
-# Start with PM2 (root PM2 instance — always prefix with sudo)
-sudo pm2 start "python scheduler.py" --name xrpl-indexer-v1
-sudo pm2 start "uvicorn api:app --host 0.0.0.0 --port 8000" --name xrpl-api
+# Start the indexer, API, and host/domain monitor. The PM2 config includes
+# automatic restarts, exponential backoff, and per-process memory limits.
+sudo pm2 start ecosystem.config.cjs
 sudo pm2 save
 sudo pm2 startup
 
 # Deploy updates
 git pull
-sudo pm2 restart all
+sudo pm2 startOrReload ecosystem.config.cjs --update-env
+sudo pm2 save
 
 # View logs
 sudo pm2 logs xrpl-api
 sudo pm2 logs xrpl-indexer-v1
+sudo pm2 logs xrpl-monitor
 ```
+
+New log lines have ISO-8601 timestamps. Indexer logs include structured
+`indexing_cycle_started`, `indexing_cycle_finished`, `indexing_cycle_error`, and
+`ledger_processed` events with durations, PID, and resident/peak memory. To keep
+PM2 logs bounded, enable rotation once on the server:
+
+```bash
+sudo pm2 install pm2-logrotate
+sudo pm2 set pm2-logrotate:max_size 20M
+sudo pm2 set pm2-logrotate:retain 14
+sudo pm2 set pm2-logrotate:compress true
+sudo pm2 set pm2-logrotate:dateFormat 'YYYY-MM-DD_HH-mm-ss'
+```
+
+Inspect recent timestamped history without following the log indefinitely:
+
+```bash
+sudo pm2 logs xrpl-indexer-v1 --lines 200 --nostream
+sudo pm2 logs xrpl-api --lines 200 --nostream
+sudo pm2 logs xrpl-monitor --lines 200 --nostream
+```
+
+### EC2 monitoring and crash diagnosis
+
+Set `MONITOR_PUBLIC_HEALTH_URL=https://your-domain.example/health` in `.env` so
+the monitor checks both localhost and the public DNS/TLS/reverse-proxy path. Set
+`MONITOR_WEBHOOK_URL` to receive an alert when memory, disk, or either endpoint
+fails, and a recovery message when it returns. The monitor emits one JSON metric
+record per minute to the `xrpl-monitor` PM2 log. It also alerts when the ledger
+index exposed by `/status` has not advanced for 15 minutes (configurable with
+`MONITOR_INDEXER_STALE_SECONDS`).
+
+To collect the evidence that distinguishes OOM, disk/inode exhaustion, process
+failure, and public routing failure, run this on the instance (pass the public
+base URL without a trailing slash):
+
+```bash
+chmod +x ops/diagnose-ec2.sh
+./ops/diagnose-ec2.sh https://your-domain.example
+```
+
+The previous-boot kernel section is especially important after an instance
+restart: `Killed process` or `oom-kill` confirms RAM exhaustion. A full root
+filesystem or zero free inodes confirms storage exhaustion. If localhost is
+healthy while the public check fails, investigate DNS, TLS, Nginx/load balancer,
+and the EC2 security group instead of the Python process.
+
+For persistent AWS metrics and logs, attach an instance role with
+`CloudWatchAgentServerPolicy`, install the Amazon CloudWatch Agent, then load the
+checked-in config:
+
+```bash
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config -m ec2 \
+  -c file:ops/amazon-cloudwatch-agent.json -s
+```
+
+Create CloudWatch alarms for `mem_used_percent > 85`, `disk_used_percent > 85`,
+and EC2 `StatusCheckFailed > 0`. Host-local monitoring cannot alert while the
+whole instance is unreachable, so the EC2 status-check alarm is essential.
+
+On a roughly 1 GiB instance, leave parallel processing disabled unless a load
+test proves there is enough headroom. A small swap file can prevent abrupt OOM
+kills during brief spikes, but it is a safety net rather than a substitute for
+memory alarms or a larger instance.
 
 ---
 

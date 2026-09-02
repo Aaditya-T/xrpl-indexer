@@ -5,6 +5,7 @@ from database import Database
 from xrpl_client import XRPLClient
 from state_processor import StateProcessor
 from config import Config
+from observability import emit
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -146,6 +147,7 @@ class XRPLIndexer:
 
         Returns the number of transactions stored in the transactions table.
         """
+        started = time.monotonic()
         print(f"Processing ledger {ledger_index}...")
         transactions, close_time_iso = self.xrpl_client.get_ledger_with_transactions(ledger_index)
         stored_count = 0
@@ -192,7 +194,15 @@ class XRPLIndexer:
                 self.db.insert_transaction(tx_data)
                 stored_count += 1
 
-        print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count}")
+        duration = round(time.monotonic() - started, 3)
+        print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count} in {duration}s")
+        emit(
+            "ledger_processed",
+            ledger_index=ledger_index,
+            transactions_seen=len(transactions),
+            transactions_stored=stored_count,
+            duration_seconds=duration,
+        )
         return stored_count
 
     def process_ledgers_parallel(self, ledgers_to_process: list) -> int:
@@ -244,12 +254,12 @@ class XRPLIndexer:
     # Main cycle
     # ------------------------------------------------------------------
 
-    def run_indexing_cycle(self):
+    def run_indexing_cycle(self) -> bool:
         """Run a single indexing cycle."""
         for attempt in range(2):
             try:
                 self._run_indexing_cycle_once()
-                return
+                return True
             except Exception as e:
                 is_db_connection_error = (
                     hasattr(self.db, "is_connection_error")
@@ -262,9 +272,18 @@ class XRPLIndexer:
                     continue
 
                 print(f"Error during indexing cycle: {e}")
+                emit(
+                    "indexing_cycle_error",
+                    level="error",
+                    error_type=type(e).__name__,
+                    error=str(e),
+                    attempt=attempt + 1,
+                )
                 import traceback
                 traceback.print_exc()
-                return
+                return False
+
+        return False
 
     def _run_indexing_cycle_once(self):
         """Run one indexing attempt. Exceptions are handled by run_indexing_cycle."""
