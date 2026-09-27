@@ -30,7 +30,9 @@ once and the ledger-processing step runs once before all assertions.
 """
 from __future__ import annotations
 
+import json
 import os
+import secrets
 import tempfile
 import time
 import pytest
@@ -257,7 +259,13 @@ def scenario(testnet_client, hub_wallet, gateway_wallet, spoke_wallet, test_db):
         db=test_db,
         xrpl_client=xrpl_c,
         central_wallet=hub_wallet.classic_address,
+        parent_wallets=[],
+        track_source_tags=[],
     )
+    # Keep the test independent of the operator's local .env filters.
+    indexer.filter_tx_types = []
+    indexer.filter_addresses = []
+    indexer.filter_source_tags = []
 
     for li in sorted(set(ledgers_touched)):
         print(f"\n[Indexer] Processing ledger {li}...")
@@ -488,3 +496,118 @@ class TestTransactionsTable:
         tx_types = [r["transaction_type"] for r in rows]
         assert "TrustSet" in tx_types,    f"TrustSet not found in spoke txns: {tx_types}"
         assert "OfferCreate" in tx_types, f"OfferCreate not found in spoke txns: {tx_types}"
+
+
+def test_additional_parent_and_tagged_funder_live(
+    testnet_client, hub_wallet, gateway_wallet, tmp_path_factory,
+):
+    """Validate both new discovery routes against real testnet metadata."""
+    from xrpl.models.transactions import Payment
+    from xrpl.transaction import submit_and_wait
+    from xrpl.wallet import Wallet
+
+    from database import Database
+    from indexer import XRPLIndexer
+    from xrpl_client import XRPLClient
+
+    parent_child = Wallet.create()
+    tagged_child = Wallet.create()
+    tag = secrets.randbelow(2**32 - 2) + 1
+
+    parent_activation = submit_and_wait(
+        Payment(
+            account=gateway_wallet.classic_address,
+            destination=parent_child.classic_address,
+            amount="50000000",
+        ),
+        testnet_client, gateway_wallet,
+    )
+    tagged_activation = submit_and_wait(
+        Payment(
+            account=parent_child.classic_address,
+            destination=tagged_child.classic_address,
+            amount="20000000",
+            source_tag=tag,
+        ),
+        testnet_client, parent_child,
+    )
+    later_payment = submit_and_wait(
+        Payment(
+            account=tagged_child.classic_address,
+            destination=gateway_wallet.classic_address,
+            amount="1000000",
+        ),
+        testnet_client, tagged_child,
+    )
+    ledger_indexes = sorted({
+        _ledger_index(parent_activation),
+        _ledger_index(tagged_activation),
+        _ledger_index(later_payment),
+    })
+    assert min(ledger_indexes) > 0
+
+    db_file = tmp_path_factory.mktemp("multi_source_testnet") / "indexer.db"
+    db = Database(db_url=f"sqlite:///{db_file}", db_type="sqlite")
+    try:
+        indexer = XRPLIndexer(
+            db=db,
+            xrpl_client=XRPLClient(json_rpc_url=TESTNET_RPC),
+            central_wallet=hub_wallet.classic_address,
+            parent_wallets=[gateway_wallet.classic_address],
+            track_source_tags=[tag],
+        )
+        # The tracking tag must retain its transaction even when all legacy
+        # storage filters would exclude it. Discovery and state stay separate.
+        indexer.filter_tx_types = ["OfferCreate"]
+        indexer.filter_addresses = [hub_wallet.classic_address]
+        indexer.filter_source_tags = [tag + 1]
+        indexer.process_ledgers_parallel(ledger_indexes)
+
+        assert db.is_tracked_wallet(parent_child.classic_address)
+        assert db.is_tracked_wallet(tagged_child.classic_address)
+        assert not db.is_tracked_wallet(gateway_wallet.classic_address)
+        assert _query_one(
+            db, "SELECT activation_tx_hash FROM tracked_wallets WHERE address = ?",
+            (parent_child.classic_address,),
+        )["activation_tx_hash"] == _tx_hash(parent_activation)
+        assert _query_one(
+            db, "SELECT activation_tx_hash FROM tracked_wallets WHERE address = ?",
+            (tagged_child.classic_address,),
+        )["activation_tx_hash"] == _tx_hash(tagged_activation)
+
+        tagged_row = _query_one(
+            db, "SELECT source_tag, transaction_data FROM transactions WHERE transaction_hash = ?",
+            (_tx_hash(tagged_activation),),
+        )
+        assert tagged_row is not None
+        assert tagged_row["source_tag"] == tag
+        assert _query_one(
+            db, "SELECT 1 FROM transactions WHERE transaction_hash = ?",
+            (_tx_hash(parent_activation),),
+        ) is None
+        assert _query_one(
+            db, "SELECT 1 FROM transactions WHERE transaction_hash = ?",
+            (_tx_hash(later_payment),),
+        ) is None
+        state = _query_one(
+            db, "SELECT sequence, ledger_index FROM account_states WHERE address = ?",
+            (tagged_child.classic_address,),
+        )
+        assert state is not None
+        assert state["sequence"] >= 2
+        assert state["ledger_index"] >= _ledger_index(later_payment)
+
+        # Restart discovery from a real stored tagged transaction.
+        recovery_file = tmp_path_factory.mktemp("tagged_recovery_testnet") / "indexer.db"
+        recovery_db = Database(db_url=f"sqlite:///{recovery_file}", db_type="sqlite")
+        try:
+            recovery_db.insert_transaction(json.loads(tagged_row["transaction_data"]))
+            XRPLIndexer(
+                db=recovery_db, xrpl_client=XRPLClient(json_rpc_url=TESTNET_RPC),
+                central_wallet="", parent_wallets=[], track_source_tags=[tag],
+            )
+            assert recovery_db.is_tracked_wallet(tagged_child.classic_address)
+        finally:
+            recovery_db.close()
+    finally:
+        db.close()

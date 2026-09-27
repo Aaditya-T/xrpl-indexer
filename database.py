@@ -5,6 +5,7 @@ from psycopg2.extras import RealDictCursor
 import sqlite3
 import json
 import threading
+from contextlib import contextmanager
 from typing import Optional, List, Dict, Any, Union
 from config import Config
 
@@ -54,6 +55,7 @@ class Database:
         self.conn: Optional[Union[psycopg2.extensions.connection, sqlite3.Connection]] = None
         self._lock = threading.RLock()
         self._tracked_wallets_cache: set[str] = set()
+        self._ledger_transaction_active = False
         self.connect()
         self.create_tables()
         self._load_tracked_wallets_cache()
@@ -112,6 +114,8 @@ class Database:
             raise
 
     def _commit(self):
+        if self._ledger_transaction_active:
+            return
         try:
             self.ensure_connection().commit()
         except DBConnectionErrors:
@@ -119,11 +123,37 @@ class Database:
             raise
 
     def _rollback(self):
+        if self._ledger_transaction_active:
+            return
         try:
             if self.conn is not None and not self._connection_is_closed():
                 self.conn.rollback()
         except DBConnectionErrors:
             self.reconnect()
+
+    @contextmanager
+    def ledger_transaction(self, ledger_index: int):
+        """Publish all state from one ledger and its watermark atomically."""
+        with self._lock:
+            if self._ledger_transaction_active:
+                raise RuntimeError("nested ledger transaction")
+            conn = self.ensure_connection()
+            if self.db_type == "sqlite":
+                conn.execute("BEGIN")
+            self._ledger_transaction_active = True
+            try:
+                yield
+                self.update_last_processed_ledger_index(ledger_index)
+                conn.commit()
+            except BaseException:
+                try:
+                    conn.rollback()
+                finally:
+                    # Discovery updates this cache before the SQL transaction commits.
+                    self._load_tracked_wallets_cache()
+                raise
+            finally:
+                self._ledger_transaction_active = False
 
     # ------------------------------------------------------------------
     # Table creation
@@ -203,6 +233,8 @@ class Database:
                 no_ripple_peer BOOLEAN DEFAULT FALSE,
                 freeze_flag BOOLEAN DEFAULT FALSE,
                 peer_freeze_flag BOOLEAN DEFAULT FALSE,
+                deep_freeze_flag BOOLEAN,
+                peer_deep_freeze_flag BOOLEAN,
                 is_deleted BOOLEAN DEFAULT FALSE,
                 ledger_index BIGINT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -242,8 +274,11 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(transaction_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_account ON transactions(account)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_destination ON transactions(destination)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_source_tag ON transactions(source_tag)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tl_issuer_currency ON trustlines(issuer, currency)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_offers_account ON offers(account)")
+        cursor.execute("ALTER TABLE trustlines ADD COLUMN IF NOT EXISTS deep_freeze_flag BOOLEAN")
+        cursor.execute("ALTER TABLE trustlines ADD COLUMN IF NOT EXISTS peer_deep_freeze_flag BOOLEAN")
 
     def _create_tables_sqlite(self, cursor):
         cursor.execute("""
@@ -306,6 +341,8 @@ class Database:
                 no_ripple_peer INTEGER DEFAULT 0,
                 freeze_flag INTEGER DEFAULT 0,
                 peer_freeze_flag INTEGER DEFAULT 0,
+                deep_freeze_flag INTEGER,
+                peer_deep_freeze_flag INTEGER,
                 is_deleted INTEGER DEFAULT 0,
                 ledger_index INTEGER,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -345,8 +382,14 @@ class Database:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tx_type ON transactions(transaction_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_account ON transactions(account)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_destination ON transactions(destination)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_source_tag ON transactions(source_tag)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_tl_issuer_currency ON trustlines(issuer, currency)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_offers_account ON offers(account)")
+        cursor.execute("PRAGMA table_info(trustlines)")
+        columns = {row[1] for row in cursor.fetchall()}
+        for name in ("deep_freeze_flag", "peer_deep_freeze_flag"):
+            if name not in columns:
+                cursor.execute(f"ALTER TABLE trustlines ADD COLUMN {name} INTEGER")
 
     # ------------------------------------------------------------------
     # Tracked wallets
@@ -393,7 +436,7 @@ class Database:
         except Exception as e:
             print(f"Error adding tracked wallet {address}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
             return False
         finally:
@@ -403,48 +446,52 @@ class Database:
         """Return all tracked wallet addresses."""
         return list(self._tracked_wallets_cache)
 
-    def get_central_wallet_payments_for_discovery(self, central_wallet: str) -> list[dict]:
+    def get_payments_for_discovery(
+        self, parent_wallets: set[str], source_tags: set[int],
+        after_id: int = 0, limit: int = 500,
+    ) -> list[dict]:
         """
-        Fetch Payment transactions from the central wallet, in ledger order.
-        Returns address, tx_hash, and transaction_data so callers can inspect
-        AffectedNodes for AccountRoot creation (the definitive activation signal).
+        Fetch one page of stored candidate activation payments. Check their
+        metadata in the caller before enrolling any destination wallet.
         """
+        if not parent_wallets and not source_tags:
+            return []
+
+        placeholder = "%s" if self.db_type == "postgresql" else "?"
+        conditions = []
+        params: list = [after_id]
+        if parent_wallets:
+            conditions.append(
+                "account IN (" + ", ".join([placeholder] * len(parent_wallets)) + ")"
+            )
+            params.extend(sorted(parent_wallets))
+        if source_tags:
+            conditions.append(
+                "source_tag IN (" + ", ".join([placeholder] * len(source_tags)) + ")"
+            )
+            params.extend(sorted(source_tags))
+
         cursor = self._cursor()
         try:
-            if self.db_type == "postgresql":
-                cursor.execute(
-                    "SELECT DISTINCT ON (destination) destination, transaction_hash, transaction_data "
-                    "FROM transactions "
-                    "WHERE account = %s AND transaction_type = 'Payment' AND destination IS NOT NULL "
-                    "ORDER BY destination, ledger_index ASC",
-                    (central_wallet,),
-                )
-            else:
-                # SQLite: use a CTE to deterministically select the earliest tx per destination.
-                # A bare GROUP BY would pick an arbitrary row for transaction_hash / transaction_data.
-                cursor.execute(
-                    "WITH earliest AS ("
-                    "  SELECT destination, MIN(ledger_index) AS min_li"
-                    "  FROM transactions"
-                    "  WHERE account = ? AND transaction_type = 'Payment' AND destination IS NOT NULL"
-                    "  GROUP BY destination"
-                    ")"
-                    "SELECT t.destination, t.transaction_hash, t.transaction_data"
-                    " FROM transactions t"
-                    " JOIN earliest ON t.destination = earliest.destination"
-                    "              AND t.ledger_index = earliest.min_li"
-                    " WHERE t.account = ? AND t.transaction_type = 'Payment'",
-                    (central_wallet, central_wallet),
-                )
+            cursor.execute(
+                "SELECT id, destination, transaction_hash, transaction_data "
+                "FROM transactions AS t "
+                f"WHERE id > {placeholder} AND transaction_type = 'Payment' "
+                "AND destination IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM tracked_wallets AS w WHERE w.address = t.destination) "
+                "AND (" + " OR ".join(conditions) + ") "
+                f"ORDER BY id ASC LIMIT {placeholder}",
+                [*params, limit],
+            )
             rows = cursor.fetchall()
         finally:
             cursor.close()
         if self.db_type == "postgresql":
             return [
-                {"address": r["destination"], "tx_hash": r["transaction_hash"], "transaction_data": r["transaction_data"]}
+                {"id": r["id"], "address": r["destination"], "tx_hash": r["transaction_hash"], "transaction_data": r["transaction_data"]}
                 for r in rows
             ]
-        return [{"address": r[0], "tx_hash": r[1], "transaction_data": r[2]} for r in rows]
+        return [{"id": r[0], "address": r[1], "tx_hash": r[2], "transaction_data": r[3]} for r in rows]
 
     # ------------------------------------------------------------------
     # Ledger metadata
@@ -470,7 +517,7 @@ class Database:
         except Exception as e:
             print(f"Error storing ledger metadata for {ledger_index}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -530,7 +577,7 @@ class Database:
         except Exception as e:
             print(f"Error upserting account state for {address}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -538,6 +585,96 @@ class Database:
     # ------------------------------------------------------------------
     # Trustlines
     # ------------------------------------------------------------------
+
+    def get_trustlines_missing_deep_freeze(self) -> list[dict]:
+        """Active legacy rows whose flag values are unknown."""
+        cursor = self._cursor()
+        try:
+            cursor.execute("SELECT account, issuer, currency, ledger_index FROM trustlines "
+                           "WHERE is_deleted = FALSE "
+                           "AND (deep_freeze_flag IS NULL OR peer_deep_freeze_flag IS NULL) "
+                           "ORDER BY account, issuer, currency")
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            cursor.close()
+
+    def get_stored_ripple_state(
+        self, account: str, issuer: str, currency: str, ledger_index: int,
+    ) -> Optional[dict]:
+        """Find the last stored trustline node at its last indexed ledger."""
+        cursor = self._cursor()
+        try:
+            ph = "%s" if self.db_type == "postgresql" else "?"
+            cursor.execute(f"SELECT transaction_data FROM transactions WHERE ledger_index = {ph} "
+                           "ORDER BY id DESC", (ledger_index,))
+            for row in cursor.fetchall():
+                data = row["transaction_data"]
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data)
+                    except (TypeError, ValueError):
+                        continue
+                if not isinstance(data, dict):
+                    continue
+                full = data.get("_full_data")
+                if not isinstance(full, dict):
+                    continue
+                meta = full.get("meta") or {}
+                if not isinstance(meta, dict):
+                    continue
+                nodes = meta.get("AffectedNodes")
+                if not isinstance(nodes, list):
+                    continue
+                for wrapper in reversed(nodes):
+                    if not isinstance(wrapper, dict):
+                        continue
+                    node = wrapper.get("ModifiedNode") or wrapper.get("CreatedNode")
+                    if not isinstance(node, dict) or node.get("LedgerEntryType") != "RippleState":
+                        continue
+                    fields = node.get("FinalFields") or node.get("NewFields") or {}
+                    if not isinstance(fields, dict):
+                        continue
+                    high = (fields.get("HighLimit") or {}).get("issuer")
+                    low = (fields.get("LowLimit") or {}).get("issuer")
+                    line_currency = ((fields.get("HighLimit") or {}).get("currency")
+                                     or (fields.get("LowLimit") or {}).get("currency"))
+                    if {high, low} == {account, issuer} and line_currency == currency:
+                        return fields
+            return None
+        finally:
+            cursor.close()
+
+    def backfill_deep_freeze_flags(
+        self, account: str, issuer: str, currency: str,
+        deep_freeze_flag: bool, peer_deep_freeze_flag: bool, snapshot_ledger_index: int,
+    ) -> bool:
+        """Fill only an unchanged legacy row; newer indexed state wins."""
+        cursor = self._cursor()
+        try:
+            ph = "%s" if self.db_type == "postgresql" else "?"
+            cursor.execute(
+                f"UPDATE trustlines SET deep_freeze_flag = {ph}, peer_deep_freeze_flag = {ph} "
+                f"WHERE account = {ph} AND issuer = {ph} AND currency = {ph} "
+                "AND is_deleted = FALSE "
+                f"AND (ledger_index IS NULL OR ledger_index <= {ph}) "
+                "AND (deep_freeze_flag IS NULL OR peer_deep_freeze_flag IS NULL)",
+                (bool(deep_freeze_flag), bool(peer_deep_freeze_flag),
+                 account, issuer, currency, snapshot_ledger_index),
+            )
+            changed = cursor.rowcount > 0
+            if changed:
+                if self.db_type == "postgresql":
+                    cursor.execute("UPDATE indexer_state SET updated_at = clock_timestamp() WHERE id = 1")
+                else:
+                    cursor.execute("UPDATE indexer_state SET updated_at = "
+                                   "STRFTIME('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = 1")
+            self._commit()
+            return changed
+        except Exception:
+            self._rollback()
+            raise
+        finally:
+            cursor.close()
 
     def upsert_trustline(
         self,
@@ -553,6 +690,8 @@ class Database:
         no_ripple_peer: bool,
         freeze_flag: bool,
         peer_freeze_flag: bool,
+        deep_freeze_flag: bool,
+        peer_deep_freeze_flag: bool,
         is_deleted: bool,
         ledger_index: int,
     ):
@@ -565,6 +704,8 @@ class Database:
             nr_p = int(no_ripple_peer)
             fr = int(freeze_flag)
             fr_p = int(peer_freeze_flag)
+            dfr = int(deep_freeze_flag)
+            dfr_p = int(peer_deep_freeze_flag)
             d = int(is_deleted)
 
             if self.db_type == "postgresql":
@@ -573,8 +714,9 @@ class Database:
                     INSERT INTO trustlines
                         (account, issuer, currency, balance, limit_amount, limit_peer,
                          authorized, peer_authorized, no_ripple, no_ripple_peer,
-                         freeze_flag, peer_freeze_flag, is_deleted, ledger_index, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                         freeze_flag, peer_freeze_flag, deep_freeze_flag, peer_deep_freeze_flag,
+                         is_deleted, ledger_index, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
                     ON CONFLICT (account, issuer, currency) DO UPDATE SET
                         balance          = EXCLUDED.balance,
                         limit_amount     = EXCLUDED.limit_amount,
@@ -585,6 +727,8 @@ class Database:
                         no_ripple_peer   = EXCLUDED.no_ripple_peer,
                         freeze_flag      = EXCLUDED.freeze_flag,
                         peer_freeze_flag = EXCLUDED.peer_freeze_flag,
+                        deep_freeze_flag = EXCLUDED.deep_freeze_flag,
+                        peer_deep_freeze_flag = EXCLUDED.peer_deep_freeze_flag,
                         is_deleted     = EXCLUDED.is_deleted,
                         ledger_index   = EXCLUDED.ledger_index,
                         updated_at     = NOW()
@@ -592,7 +736,7 @@ class Database:
                        OR trustlines.ledger_index <= EXCLUDED.ledger_index
                     """,
                     (account, issuer, currency, balance, limit_amount, limit_peer,
-                     bool(a), bool(p_a), bool(nr), bool(nr_p), bool(fr), bool(fr_p),
+                     bool(a), bool(p_a), bool(nr), bool(nr_p), bool(fr), bool(fr_p), bool(dfr), bool(dfr_p),
                      bool(d), ledger_index),
                 )
             else:
@@ -601,8 +745,9 @@ class Database:
                     INSERT INTO trustlines
                         (account, issuer, currency, balance, limit_amount, limit_peer,
                          authorized, peer_authorized, no_ripple, no_ripple_peer,
-                         freeze_flag, peer_freeze_flag, is_deleted, ledger_index, updated_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                         freeze_flag, peer_freeze_flag, deep_freeze_flag, peer_deep_freeze_flag,
+                         is_deleted, ledger_index, updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
                     ON CONFLICT(account, issuer, currency) DO UPDATE SET
                         balance          = excluded.balance,
                         limit_amount     = excluded.limit_amount,
@@ -613,6 +758,8 @@ class Database:
                         no_ripple_peer   = excluded.no_ripple_peer,
                         freeze_flag      = excluded.freeze_flag,
                         peer_freeze_flag = excluded.peer_freeze_flag,
+                        deep_freeze_flag = excluded.deep_freeze_flag,
+                        peer_deep_freeze_flag = excluded.peer_deep_freeze_flag,
                         is_deleted     = excluded.is_deleted,
                         ledger_index   = excluded.ledger_index,
                         updated_at     = CURRENT_TIMESTAMP
@@ -620,13 +767,13 @@ class Database:
                        OR trustlines.ledger_index <= excluded.ledger_index
                     """,
                     (account, issuer, currency, balance, limit_amount, limit_peer,
-                     a, p_a, nr, nr_p, fr, fr_p, d, ledger_index),
+                     a, p_a, nr, nr_p, fr, fr_p, dfr, dfr_p, d, ledger_index),
                 )
             self._commit()
         except Exception as e:
             print(f"Error upserting trustline {account}/{issuer}/{currency}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -653,7 +800,7 @@ class Database:
         except Exception as e:
             print(f"Error deleting trustline {account}/{issuer}/{currency}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -738,7 +885,7 @@ class Database:
         except Exception as e:
             print(f"Error upserting offer {account}/{sequence}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -765,7 +912,7 @@ class Database:
         except Exception as e:
             print(f"Error deleting offer {account}/{sequence}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()
@@ -793,10 +940,11 @@ class Database:
         try:
             if self.db_type == "postgresql":
                 cursor.execute(
-                    "INSERT INTO indexer_state (id, last_processed_ledger_index) VALUES (1, %s) "
+                    "INSERT INTO indexer_state (id, last_processed_ledger_index, updated_at) "
+                    "VALUES (1, %s, clock_timestamp()) "
                     "ON CONFLICT (id) DO UPDATE SET "
                     "last_processed_ledger_index = EXCLUDED.last_processed_ledger_index, "
-                    "updated_at = CURRENT_TIMESTAMP",
+                    "updated_at = clock_timestamp()",
                     (ledger_index,),
                 )
             else:
@@ -804,7 +952,7 @@ class Database:
                     "INSERT INTO indexer_state (id, last_processed_ledger_index) VALUES (1, ?) "
                     "ON CONFLICT (id) DO UPDATE SET "
                     "last_processed_ledger_index = excluded.last_processed_ledger_index, "
-                    "updated_at = CURRENT_TIMESTAMP",
+                    "updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ','now')",
                     (ledger_index,),
                 )
             self._commit()
@@ -850,7 +998,7 @@ class Database:
         except Exception as e:
             print(f"Error inserting transaction {tx_hash}: {e}")
             self._rollback()
-            if self.is_connection_error(e):
+            if self.is_connection_error(e) or self._ledger_transaction_active:
                 raise
         finally:
             cursor.close()

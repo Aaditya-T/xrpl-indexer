@@ -122,6 +122,8 @@ class AccountState(_Base):
     flags: Optional[int] = None
     updated_at: Optional[Any] = None
     ledger_index: Optional[int] = None
+    snapshot_ledger_index: Optional[int] = None
+    indexed_at: Optional[Any] = None
 
 
 # --- Balances ---
@@ -138,12 +140,36 @@ class Balance(_Base):
     no_ripple_peer: Optional[bool] = None
     freeze_flag: Optional[bool] = None
     peer_freeze_flag: Optional[bool] = None
+    deep_freeze_flag: Optional[bool] = None
+    peer_deep_freeze_flag: Optional[bool] = None
     is_deleted: Optional[bool] = None
 
 
 class BalancesResponse(_Base):
     address: str
     balances: list[Balance]
+    snapshot_ledger_index: Optional[int] = None
+    indexed_at: Optional[Any] = None
+
+
+class AccountSnapshotResponse(_Base):
+    address: str
+    snapshot_ledger_index: Optional[int] = None
+    indexed_at: Optional[Any] = None
+    account: AccountState
+    trustlines: list[Balance]
+
+
+class IssuerTrustline(Balance):
+    account: str
+
+
+class IssuerSnapshotResponse(_Base):
+    issuer: str
+    snapshot_ledger_index: Optional[int] = None
+    indexed_at: Optional[Any] = None
+    account: AccountState
+    trustlines: list[IssuerTrustline]
 
 
 # --- Offers ---
@@ -176,6 +202,9 @@ class Holder(_Base):
     authorized: Optional[bool] = None
     peer_authorized: Optional[bool] = None
     freeze_flag: Optional[bool] = None
+    peer_freeze_flag: Optional[bool] = None
+    deep_freeze_flag: Optional[bool] = None
+    peer_deep_freeze_flag: Optional[bool] = None
     no_ripple: Optional[bool] = None
 
 
@@ -184,6 +213,8 @@ class HoldersResponse(_Base):
     currency: str
     holder_count: int
     holders: list[Holder]
+    snapshot_ledger_index: Optional[int] = None
+    indexed_at: Optional[Any] = None
 
 
 # --- Orderbook ---
@@ -297,10 +328,11 @@ app.add_middleware(
 
 @contextmanager
 def get_cursor() -> Generator[Any, None, None]:
-    """Open a short-lived read-only database connection."""
+    """Open a repeatable database read snapshot for the whole response."""
     if Config.DATABASE_TYPE == "postgresql":
         conn = psycopg2.connect(Config.DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
         try:
+            conn.set_session(readonly=True, isolation_level="REPEATABLE READ")
             cursor = conn.cursor()
             yield cursor
         finally:
@@ -311,6 +343,7 @@ def get_cursor() -> Generator[Any, None, None]:
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("BEGIN")
             cursor = conn.cursor()
             yield cursor
         finally:
@@ -328,6 +361,29 @@ def row_to_dict(row: Any) -> dict:
 
 def rows_to_list(rows: list) -> list[dict]:
     return [row_to_dict(r) for r in rows]
+
+
+def _snapshot_marker(cur: Any) -> dict:
+    cur.execute("SELECT last_processed_ledger_index AS snapshot_ledger_index, "
+                "updated_at AS indexed_at FROM indexer_state WHERE id = 1")
+    return row_to_dict(cur.fetchone()) or {"snapshot_ledger_index": None, "indexed_at": None}
+
+
+def _trustlines_for_account(cur: Any, address: str, include_zero: bool) -> list[dict]:
+    ph = _ph()
+    cur.execute(
+        f"SELECT issuer, currency, balance, limit_amount, limit_peer, authorized, "
+        f"peer_authorized, no_ripple, no_ripple_peer, freeze_flag, peer_freeze_flag, "
+        f"deep_freeze_flag, peer_deep_freeze_flag, is_deleted "
+        f"FROM trustlines WHERE account = {ph} AND is_deleted = FALSE "
+        f"ORDER BY issuer, currency",
+        (address,),
+    )
+    rows = rows_to_list(cur.fetchall())
+    if include_zero:
+        return rows
+    return [row for row in rows if row["balance"] is not None
+            and Decimal(str(row["balance"])) != 0]
 
 
 def _ph() -> str:
@@ -532,9 +588,10 @@ def account_info(address: str):
     with get_cursor() as cur:
         cur.execute(f"SELECT * FROM account_states WHERE address = {ph}", (address,))
         row = cur.fetchone()
+        marker = _snapshot_marker(cur)
     if not row:
         raise HTTPException(status_code=404, detail="Account not found or not tracked")
-    return row_to_dict(row)
+    return {**row_to_dict(row), **marker}
 
 
 @app.get("/accounts/{address}/balances", response_model=BalancesResponse)
@@ -549,17 +606,7 @@ def account_balances(
     """
     ph = _ph()
     with get_cursor() as cur:
-        query = (
-            f"SELECT issuer, currency, balance, limit_amount, limit_peer, "
-            f"authorized, peer_authorized, no_ripple, no_ripple_peer, freeze_flag, peer_freeze_flag, is_deleted "
-            f"FROM trustlines WHERE account = {ph} AND is_deleted = FALSE"
-        )
-        params: list[Any] = [address]
-        if not include_zero:
-            query += f" AND balance != {ph} AND balance != {ph}"
-            params += ["0", "0.0"]
-        cur.execute(query, params)
-        trustlines = rows_to_list(cur.fetchall())
+        trustlines = _trustlines_for_account(cur, address, include_zero)
 
         xrp_row = None
         if include_xrp:
@@ -568,12 +615,28 @@ def account_balances(
             if r:
                 drops = row_to_dict(r).get("balance_drops")
                 xrp_row = {"currency": "XRP", "issuer": None, "balance": str(drops) if drops is not None else None}
+        marker = _snapshot_marker(cur)
 
     result: list[dict] = []
     if xrp_row:
         result.append(xrp_row)
     result.extend(trustlines)
-    return {"address": address, "balances": result}
+    return {"address": address, "balances": result, **marker}
+
+
+@app.get("/accounts/{address}/snapshot", response_model=AccountSnapshotResponse)
+def account_snapshot(address: str):
+    """Account flags and every active trust line from one committed ledger snapshot."""
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(f"SELECT * FROM account_states WHERE address = {ph}", (address,))
+        account = cur.fetchone()
+        if account is None:
+            raise HTTPException(status_code=404, detail="Account not found or not tracked")
+        trustlines = _trustlines_for_account(cur, address, include_zero=True)
+        marker = _snapshot_marker(cur)
+    return {"address": address, "account": row_to_dict(account),
+            "trustlines": trustlines, **marker}
 
 
 @app.get("/accounts/{address}/offers", response_model=OffersResponse)
@@ -610,7 +673,8 @@ def token_holders(
 
     with get_cursor() as cur:
         query = (
-            f"SELECT account, balance, limit_amount, authorized, peer_authorized, freeze_flag, no_ripple "
+            f"SELECT account, balance, limit_amount, authorized, peer_authorized, "
+            f"freeze_flag, peer_freeze_flag, deep_freeze_flag, peer_deep_freeze_flag, no_ripple "
             f"FROM trustlines WHERE issuer = {ph} AND currency = {ph} AND is_deleted = FALSE"
         )
         params: list[Any] = [issuer, currency]
@@ -621,8 +685,32 @@ def token_holders(
         query += f" ORDER BY {_numeric_expr('balance')} DESC"
         cur.execute(query, params)
         rows = rows_to_list(cur.fetchall())
+        marker = _snapshot_marker(cur)
 
-    return {"issuer": issuer, "currency": currency, "holder_count": len(rows), "holders": rows}
+    return {"issuer": issuer, "currency": currency, "holder_count": len(rows), "holders": rows, **marker}
+
+
+@app.get("/issuers/{issuer}/snapshot", response_model=IssuerSnapshotResponse)
+def issuer_snapshot(issuer: str):
+    """Issuer AccountRoot flags and all tracked peers' trust lines, including zero balances."""
+    ph = _ph()
+    with get_cursor() as cur:
+        cur.execute(f"SELECT * FROM account_states WHERE address = {ph}", (issuer,))
+        account = cur.fetchone()
+        if account is None:
+            raise HTTPException(status_code=404, detail="Issuer account state is not tracked")
+        cur.execute(
+            f"SELECT account, issuer, currency, balance, limit_amount, limit_peer, "
+            f"authorized, peer_authorized, no_ripple, no_ripple_peer, freeze_flag, "
+            f"peer_freeze_flag, deep_freeze_flag, peer_deep_freeze_flag, is_deleted "
+            f"FROM trustlines WHERE issuer = {ph} AND is_deleted = FALSE "
+            f"ORDER BY account, currency",
+            (issuer,),
+        )
+        trustlines = rows_to_list(cur.fetchall())
+        marker = _snapshot_marker(cur)
+    return {"issuer": issuer, "account": row_to_dict(account),
+            "trustlines": trustlines, **marker}
 
 
 # ---------------------------------------------------------------------------

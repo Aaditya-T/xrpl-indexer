@@ -93,6 +93,12 @@ class IndexerScheduler:
         
         if Config.get_filter_source_tags():
             print(f"  - Source Tag Filter: {', '.join(map(str, Config.get_filter_source_tags()))}")
+
+        if Config.get_parent_wallet_addresses():
+            print(f"  - Funding Wallets: {', '.join(Config.get_parent_wallet_addresses())}")
+
+        if Config.get_track_source_tags():
+            print(f"  - Wallet Tracking Source Tags: {', '.join(map(str, Config.get_track_source_tags()))}")
         
         print(f"{'='*60}\n")
         

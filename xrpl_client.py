@@ -1,5 +1,6 @@
 from xrpl.clients import JsonRpcClient
-from xrpl.models.requests import Ledger, Tx
+from xrpl.models.requests import Ledger, LedgerEntry, Tx
+from xrpl.models.requests.ledger_entry import RippleState
 from typing import Optional, List, Dict, Any
 from config import Config
 
@@ -22,6 +23,23 @@ class XRPLClient:
         except Exception as e:
             print(f"Error getting current ledger index: {e}")
             raise
+
+    def get_ripple_state(self, account: str, peer: str, currency: str, ledger_index: int) -> dict:
+        """Read a raw trust line at an exact validated ledger for flag backfill."""
+        response = self.client.request(LedgerEntry(
+            ripple_state=RippleState(accounts=[account, peer], currency=currency),
+            ledger_index=ledger_index,
+        ))
+        if not response.is_successful():
+            raise RuntimeError(f"ledger_entry failed for {account}/{peer}/{currency} "
+                               f"at {ledger_index}: {response.result}")
+        result = response.result
+        if int(result.get("ledger_index", -1)) != ledger_index:
+            raise RuntimeError(f"ledger_entry returned unexpected ledger: {result.get('ledger_index')}")
+        node = result.get("node")
+        if not isinstance(node, dict) or node.get("LedgerEntryType") != "RippleState":
+            raise RuntimeError(f"ledger_entry returned no RippleState for {account}/{peer}/{currency}")
+        return node
     
     def get_ledger_transactions(self, ledger_index: int) -> List[str]:
         """Get all transaction hashes from a specific ledger"""

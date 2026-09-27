@@ -8,10 +8,10 @@ A Python-based XRPL blockchain indexer with a FastAPI read API. Monitors ledgers
 
 - **Scheduled monitoring** — processes new ledgers on a configurable cron interval
 - **Flexible transaction filtering** — filter by transaction type, address, or source tag
-- **Hub-and-spoke state tracking** — auto-discovers wallets funded by a central wallet and maintains their account state, trust lines, and open offers in real time
+- **Wallet state tracking** — auto-discovers wallets activated by configured funding wallets or source-tagged payments, then maintains their account state, trust lines, and open offers
 - **Ledger metadata** — records the close time of every processed ledger for timestamp-based lookups
 - **Dual database support** — PostgreSQL (production) and SQLite (testing/local)
-- **FastAPI read API** — 15 endpoints with full OpenAPI/Swagger schema docs at `/docs`
+- **FastAPI read API** — documented endpoints with OpenAPI/Swagger schema docs at `/docs`
 - **Parallel processing** — optional concurrent ledger fetching for backlog catch-up
 
 ---
@@ -31,9 +31,13 @@ DATABASE_URL=postgresql://user:pass@host:5432/dbname
 # How often to check for new ledgers (minutes)
 CRON_INTERVAL_MINUTES=5
 
-# ── Hub-and-spoke state tracking ──────────────────────────────────────────────
-# The central ("hub") wallet. Any wallet this address activates is auto-tracked.
+# ── Wallet discovery ──────────────────────────────────────────────────────────
+# The existing single funding wallet setting remains supported.
 CENTRAL_WALLET_ADDRESS=rYourHubWalletAddress
+# Optional additional funding wallets, comma-separated.
+PARENT_WALLET_ADDRESSES=rParent2,rParent3
+# Optional SourceTags whose payments can activate and enroll new wallets.
+TRACK_SOURCE_TAGS=123,456
 
 # ── Transaction storage filters (comma-separated, all optional) ───────────────
 # Leave a filter empty to match everything.
@@ -48,14 +52,43 @@ PARALLEL_WORKERS=5
 
 ### How filters interact with state tracking
 
-There are two independent systems running on every ledger:
+Discovery, state updates, and transaction storage run on every processed ledger:
 
 | System | Controlled by | What it does |
 |---|---|---|
-| **Transaction storage** | `FILTER_*` env vars | Writes matching txns to the `transactions` table |
-| **State tracking** | `CENTRAL_WALLET_ADDRESS` | Updates `account_states`, `trustlines`, `offers` for all tracked wallets — runs on **every** transaction regardless of filters |
+| **Transaction storage** | `FILTER_*` env vars, plus `TRACK_SOURCE_TAGS` | Writes transactions matching all configured `FILTER_*` rules, or any transaction with a configured tracking SourceTag |
+| **Wallet discovery** | `CENTRAL_WALLET_ADDRESS`, `PARENT_WALLET_ADDRESSES`, `TRACK_SOURCE_TAGS` | Enrolls the destination of a Payment from any configured parent **or** carrying a configured SourceTag, only when the Payment creates that account |
+| **State tracking** | Tracked wallets | Updates `account_states`, `trustlines`, `offers` for enrolled wallets on **every** transaction regardless of storage filters |
 
-So with `FILTER_SOURCE_TAGS=608402356` and `CENTRAL_WALLET_ADDRESS=rHub...`, only source-tagged transactions are stored, but account state is maintained for the hub and all its child wallets across the entire ledger.
+`FILTER_SOURCE_TAGS` still only filters ordinary transaction storage; it does not enroll wallets. To discover externally funded wallets, set `TRACK_SOURCE_TAGS`. A matching tagged transaction is stored even when an address or type filter would otherwise exclude it. Parent-funded activations still use the existing `FILTER_*` storage rules unless they also carry a tracking tag.
+
+Discovery requires an `AccountRoot` creation for the Payment destination. A payment to an already active wallet does not enroll it. On restart, discovery also checks qualifying payments already in the `transactions` table; it cannot discover payments from ledgers that were never processed or stored. On a fresh database, indexing begins at the current ledger and proceeds forward.
+
+**Ownership boundary:** An XRPL `SourceTag` is optional, sender-supplied transaction metadata. Anyone who knows a configured tag can use it on a payment, so tag-based discovery alone does not prove that a new wallet belongs to your platform. Use this mode only when that broader enrollment rule is acceptable, or verify ownership separately before treating an enrolled wallet as a platform wallet. See [XRPL source and destination tags](https://xrpl.org/docs/concepts/transactions/source-and-destination-tags).
+
+### Deep-freeze migration and backfill
+
+On startup, the database schema gains nullable `deep_freeze_flag` and
+`peer_deep_freeze_flag` columns. New trustline updates populate both. Existing
+rows stay `NULL` until backfilled, so an unknown historical value is never
+reported as `false`.
+
+Run the idempotent backfill against an XRPL node that retains the ledger in the
+indexer's `last_processed_ledger_index`:
+
+```bash
+venv/bin/python -m ops.backfill_deep_freeze --rpc-url https://YOUR-ARCHIVAL-RPC/
+```
+
+The script reads each raw `RippleState` at that exact ledger and checks the
+returned ledger index and accounts before updating the row. It also inspects
+stored transaction metadata for comparison. Stored transactions alone cannot
+prove complete coverage because historical `FILTER_*` settings may have
+excluded later changes, even within the same ledger. If the node lacks the
+required ledger, the command stops and leaves remaining fields `NULL`; rerun
+with a node that has that history. Run this after deployment and check that
+the command reports zero unknown rows. It does not rewrite balances, limits,
+or the trustline's last-change ledger.
 
 ---
 
@@ -140,7 +173,9 @@ Current account state for a tracked wallet.
   "owner_count": 3,
   "flags": 0,
   "ledger_index": 95123456,
-  "updated_at": "2026-05-14T12:00:03"
+  "updated_at": "2026-05-14T12:00:03",
+  "snapshot_ledger_index": 95123456,
+  "indexed_at": "2026-05-14T12:00:03"
 }
 ```
 
@@ -155,11 +190,25 @@ Token balances for a tracked wallet.
 ```json
 {
   "address": "rABC...",
+  "snapshot_ledger_index": 95123456,
+  "indexed_at": "2026-05-14T12:00:03",
   "balances": [
-    { "currency": "USD", "issuer": "rIssuer...", "balance": "100.5", ... }
+    { "currency": "USD", "issuer": "rIssuer...", "balance": "100.5",
+      "deep_freeze_flag": false, "peer_deep_freeze_flag": true, "freeze_flag": false }
   ]
 }
 ```
+
+`deep_freeze_flag` belongs to the requested account; `peer_deep_freeze_flag`
+belongs to the other account on that line, matching the existing freeze fields.
+Use `include_zero=true` to retrieve **all** active trust lines, including lines
+with zero balance. A `null` deep-freeze value means a legacy row still needs
+backfilling; it does not mean `false`.
+
+#### `GET /accounts/{address}/snapshot`
+Returns the tracked account's flags and **all** its active trust lines (including
+zero balances) in one response. The top-level `snapshot_ledger_index` and
+`indexed_at` identify the committed indexer state read by the response.
 
 #### `GET /accounts/{address}/offers`
 All currently open offers for a tracked wallet.
@@ -181,7 +230,10 @@ All currently open offers for a tracked wallet.
 ### Tokens
 
 #### `GET /tokens/{issuer}/{currency}/holders`
-All tracked accounts holding a non-zero balance of a token, sorted by balance descending.
+Tracked accounts with a trust line for a token, sorted by balance descending.
+Zero-balance lines may appear, but this endpoint returns only selected fields;
+use `/accounts/{address}/balances?include_zero=true` or a snapshot endpoint for
+complete trustline data.
 
 | Query param | Description |
 |---|---|
@@ -191,10 +243,23 @@ All tracked accounts holding a non-zero balance of a token, sorted by balance de
 {
   "issuer": "rIssuer...",
   "currency": "USD",
+  "snapshot_ledger_index": 95123456,
+  "indexed_at": "2026-05-14T12:00:03",
   "holder_count": 12,
   "holders": [{ "account": "rABC...", "balance": "500.0", ... }]
 }
 ```
+
+#### `GET /issuers/{issuer}/snapshot`
+Returns a **tracked** issuer's AccountRoot flags and every tracked peer's active
+trustline to that issuer, including zero balances, from the same database read
+snapshot. Returns 404 when the issuer account state is not tracked.
+
+The indexer publishes each ledger's state changes and its watermark in one
+database transaction. Compare both response-level markers when correlating
+separate calls; use a snapshot endpoint when account flags and trustlines must
+come from one response. `/status` alone does not identify the state read by a
+different request.
 
 ### Orderbook
 
@@ -356,7 +421,7 @@ Written for **every processed ledger** regardless of filters. Powers `/ledgers/r
 | Column | Type | Description |
 |---|---|---|
 | `account` | VARCHAR | Account holding the trust line |
-| `issuer` | VARCHAR | Token issuer |
+| `issuer` | VARCHAR | Other account on the trust line (usually token issuer) |
 | `currency` | VARCHAR | Currency code |
 | `balance` | TEXT | Current balance |
 | `limit_amount` | TEXT | Trust limit set by account |
@@ -365,8 +430,10 @@ Written for **every processed ledger** regardless of filters. Powers `/ledgers/r
 | `peer_authorized` | BOOLEAN | Whether issuer is authorized |
 | `no_ripple` | BOOLEAN | No-ripple flag |
 | `no_ripple_peer` | BOOLEAN | Peer no-ripple flag |
-| `freeze_flag` | BOOLEAN | Freeze flag |
-| `peer_freeze_flag` | BOOLEAN | Peer freeze flag |
+| `freeze_flag` | BOOLEAN | This account's freeze flag |
+| `peer_freeze_flag` | BOOLEAN | Other account's freeze flag |
+| `deep_freeze_flag` | BOOLEAN, nullable | This account's deep-freeze flag; NULL until a legacy row is backfilled |
+| `peer_deep_freeze_flag` | BOOLEAN, nullable | Other account's deep-freeze flag; NULL until backfilled |
 | `is_deleted` | BOOLEAN | True if removed via DeletedNode |
 
 ### `offers`
@@ -447,7 +514,11 @@ the monitor checks both localhost and the public DNS/TLS/reverse-proxy path. Set
 fails, and a recovery message when it returns. The monitor emits one JSON metric
 record per minute to the `xrpl-monitor` PM2 log. It also alerts when the ledger
 index exposed by `/status` has not advanced for 15 minutes (configurable with
-`MONITOR_INDEXER_STALE_SECONDS`).
+`MONITOR_INDEXER_STALE_SECONDS`). Slack receives a warning on the transition from
+healthy to warning and a recovery message when all checks clear, rather than a
+message on every poll. It does not report individual transactions, SourceTags,
+or PostgreSQL backup failures. A monitor on the same host cannot report a total
+EC2 outage; use an external EC2 status-check alarm for that.
 
 To collect the evidence that distinguishes OOM, disk/inode exhaustion, process
 failure, and public routing failure, run this on the instance (pass the public

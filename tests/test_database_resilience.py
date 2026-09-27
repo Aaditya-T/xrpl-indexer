@@ -55,11 +55,12 @@ def test_parallel_processing_preserves_database_connection_errors():
             return isinstance(error, psycopg2.InterfaceError)
 
     class FakeXRPLClient:
-        pass
+        def get_ledger_with_transactions(self, _ledger_index):
+            return [], None
 
     indexer = XRPLIndexer(db=FakeDB(), xrpl_client=FakeXRPLClient(), central_wallet="")
 
-    def fail_with_closed_connection(_ledger_index):
+    def fail_with_closed_connection(_ledger_index, _ledger_data):
         raise psycopg2.InterfaceError("connection already closed")
 
     indexer.process_ledger = fail_with_closed_connection
@@ -84,6 +85,8 @@ def test_stale_trustline_delete_does_not_remove_newer_state(tmp_path):
         no_ripple_peer=False,
         freeze_flag=False,
         peer_freeze_flag=False,
+        deep_freeze_flag=False,
+        peer_deep_freeze_flag=False,
         is_deleted=False,
         ledger_index=20,
     )

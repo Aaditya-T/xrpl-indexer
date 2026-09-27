@@ -7,7 +7,7 @@ from state_processor import StateProcessor
 from config import Config
 from observability import emit
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 
 
 def _has_account_root_creation(meta: dict, destination: str) -> bool:
@@ -33,6 +33,8 @@ class XRPLIndexer:
         db: Optional["Database"] = None,
         xrpl_client: Optional["XRPLClient"] = None,
         central_wallet: Optional[str] = None,
+        parent_wallets: Optional[list[str]] = None,
+        track_source_tags: Optional[list[int]] = None,
     ):
         self.db = db if db is not None else Database()
         self.xrpl_client = xrpl_client if xrpl_client is not None else XRPLClient()
@@ -43,9 +45,23 @@ class XRPLIndexer:
         self.central_wallet = (
             central_wallet if central_wallet is not None else Config.CENTRAL_WALLET_ADDRESS
         ).strip()
+        if central_wallet is None and parent_wallets is None:
+            self.parent_wallets = set(Config.get_parent_wallet_addresses())
+        else:
+            additional_parents = (
+                parent_wallets if parent_wallets is not None
+                else Config.PARENT_WALLET_ADDRESSES.split(",")
+            )
+            self.parent_wallets = {
+                address.strip() for address in [self.central_wallet, *additional_parents]
+                if address.strip()
+            }
+        self.track_source_tags = set(
+            track_source_tags if track_source_tags is not None else Config.get_track_source_tags()
+        )
 
-        # Retroactively discover wallets activated before this run started
-        if self.central_wallet:
+        # Discover qualifying activations that were already stored.
+        if self.parent_wallets or self.track_source_tags:
             self._retroactive_wallet_scan()
 
     # ------------------------------------------------------------------
@@ -54,50 +70,53 @@ class XRPLIndexer:
 
     def _retroactive_wallet_scan(self):
         """
-        Scan already-stored Payment transactions from the central wallet.
-        For each one, check whether the metadata shows an AccountRoot was
-        created for the destination (i.e. the account was genuinely activated).
-        Only those destinations are added to tracked_wallets.
+        Scan stored payments from a parent wallet or carrying a tracking tag.
+        Only payments that created the destination account enroll a wallet.
         """
-        rows = self.db.get_central_wallet_payments_for_discovery(self.central_wallet)
         newly_added = 0
-        for row in rows:
-            destination = row["address"]
-            tx_hash = row["tx_hash"]
-            raw = row.get("transaction_data") or {}
-            if isinstance(raw, str):
-                try:
-                    raw = json.loads(raw)
-                except (ValueError, TypeError):
-                    raw = {}
+        after_id = 0
+        while rows := self.db.get_payments_for_discovery(
+            self.parent_wallets, self.track_source_tags, after_id=after_id
+        ):
+            for row in rows:
+                after_id = row["id"]
+                destination = row["address"]
+                if destination in self.parent_wallets:
+                    continue
+                tx_hash = row["tx_hash"]
+                raw = row.get("transaction_data") or {}
+                if isinstance(raw, str):
+                    try:
+                        raw = json.loads(raw)
+                    except (ValueError, TypeError):
+                        raw = {}
 
-            full = raw.get("_full_data") if isinstance(raw, dict) else {}
-            meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
-            if not isinstance(meta, dict):
-                continue
+                full = raw.get("_full_data") if isinstance(raw, dict) else {}
+                meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
+                if not isinstance(meta, dict):
+                    continue
 
-            if _has_account_root_creation(meta, destination):
-                added = self.db.add_tracked_wallet(destination, tx_hash)
-                if added:
-                    newly_added += 1
+                if (not self.db.is_tracked_wallet(destination)
+                        and _has_account_root_creation(meta, destination)):
+                    added = self.db.add_tracked_wallet(destination, tx_hash)
+                    if added:
+                        newly_added += 1
 
         if newly_added:
             print(f"[WalletDiscovery] Retroactively registered {newly_added} wallet(s) from stored transactions.")
 
     def _check_wallet_discovery(self, tx_data: dict, tx_hash: str):
         """
-        If this transaction is a Payment from the central wallet that
-        demonstrably activated a new account (AccountRoot CreatedNode in meta),
-        register that destination as a tracked wallet.
+        Register the destination of a parent-funded or source-tagged Payment
+        when its metadata shows that the destination account was created.
         """
-        if not self.central_wallet:
-            return
         if tx_data.get("TransactionType") != "Payment":
             return
-        if tx_data.get("Account") != self.central_wallet:
+        if (tx_data.get("Account") not in self.parent_wallets
+                and tx_data.get("SourceTag") not in self.track_source_tags):
             return
         destination = tx_data.get("Destination")
-        if not destination:
+        if not destination or destination in self.parent_wallets:
             return
 
         # _full_data is set before this method is called in process_ledger
@@ -117,6 +136,11 @@ class XRPLIndexer:
 
     def should_include_transaction(self, tx_data: dict) -> bool:
         """Return True if transaction should be stored in the transactions table."""
+        # Explicit tracking tags retain the full transaction even when a
+        # FILTER_ADDRESSES or FILTER_TRANSACTION_TYPES rule would exclude it.
+        if tx_data.get("SourceTag") in self.track_source_tags:
+            return True
+
         if self.filter_tx_types:
             if tx_data.get("TransactionType") not in self.filter_tx_types:
                 return False
@@ -137,7 +161,9 @@ class XRPLIndexer:
     # Ledger processing
     # ------------------------------------------------------------------
 
-    def process_ledger(self, ledger_index: int) -> int:
+    def process_ledger(
+        self, ledger_index: int, ledger_data: Optional[tuple] = None
+    ) -> int:
         """
         Fetch and process a single ledger.
 
@@ -149,7 +175,28 @@ class XRPLIndexer:
         """
         started = time.monotonic()
         print(f"Processing ledger {ledger_index}...")
-        transactions, close_time_iso = self.xrpl_client.get_ledger_with_transactions(ledger_index)
+        if ledger_data is None:
+            ledger_data = self.xrpl_client.get_ledger_with_transactions(ledger_index)
+        if hasattr(self.db, "ledger_transaction"):
+            with self.db.ledger_transaction(ledger_index):
+                stored_count = self._apply_ledger_data(ledger_index, ledger_data)
+        else:
+            stored_count = self._apply_ledger_data(ledger_index, ledger_data)
+
+        transactions, _ = ledger_data
+        duration = round(time.monotonic() - started, 3)
+        print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count} in {duration}s")
+        emit(
+            "ledger_processed",
+            ledger_index=ledger_index,
+            transactions_seen=len(transactions),
+            transactions_stored=stored_count,
+            duration_seconds=duration,
+        )
+        return stored_count
+
+    def _apply_ledger_data(self, ledger_index: int, ledger_data: tuple) -> int:
+        transactions, close_time_iso = ledger_data
         stored_count = 0
 
         # Always store ledger close time — independent of any transaction filters
@@ -194,60 +241,35 @@ class XRPLIndexer:
                 self.db.insert_transaction(tx_data)
                 stored_count += 1
 
-        duration = round(time.monotonic() - started, 3)
-        print(f"Ledger {ledger_index}: Processed {len(transactions)} transactions, stored {stored_count} in {duration}s")
-        emit(
-            "ledger_processed",
-            ledger_index=ledger_index,
-            transactions_seen=len(transactions),
-            transactions_stored=stored_count,
-            duration_seconds=duration,
-        )
         return stored_count
 
     def process_ledgers_parallel(self, ledgers_to_process: list) -> int:
-        """Process multiple ledgers in parallel using ThreadPoolExecutor.
+        """Fetch ledgers in parallel, then apply them in ledger order.
 
-        Ledgers are processed in fixed-size batches so memory usage stays
-        bounded regardless of backlog size.  Only PARALLEL_WORKERS ledgers
-        are in-flight (fetched + held in memory) at any one time.
+        Discovery in one ledger must happen before state changes in the next.
+        Fixed-size batches keep memory bounded regardless of backlog size.
         """
         BATCH_SIZE = max(Config.PARALLEL_WORKERS * 4, 20)
 
         total_stored = 0
         completed = 0
         total_ledgers = len(ledgers_to_process)
-        failed_ledgers = []
 
         for batch_start in range(0, total_ledgers, BATCH_SIZE):
             batch = ledgers_to_process[batch_start:batch_start + BATCH_SIZE]
 
             with ThreadPoolExecutor(max_workers=Config.PARALLEL_WORKERS) as executor:
-                future_to_ledger = {
-                    executor.submit(self.process_ledger, ledger_index): ledger_index
-                    for ledger_index in batch
-                }
+                ledger_data_batch = list(
+                    executor.map(self.xrpl_client.get_ledger_with_transactions, batch)
+                )
 
-                for future in as_completed(future_to_ledger):
-                    ledger_index = future_to_ledger[future]
-                    try:
-                        stored = future.result()
-                        total_stored += stored
-                        completed += 1
-                        if completed % 10 == 0 or completed == total_ledgers:
-                            print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
-                    except Exception as e:
-                        print(f"Error processing ledger {ledger_index}: {e}")
-                        failed_ledgers.append((ledger_index, e))
+            for ledger_index, ledger_data in zip(batch, ledger_data_batch):
+                stored = self.process_ledger(ledger_index, ledger_data)
+                total_stored += stored
+                completed += 1
+                if completed % 10 == 0 or completed == total_ledgers:
+                    print(f"Progress: {completed}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
 
-        if failed_ledgers:
-            for _, error in failed_ledgers:
-                if hasattr(self.db, "is_connection_error") and self.db.is_connection_error(error):
-                    raise error
-            raise Exception(
-                f"Failed to process {len(failed_ledgers)} ledger(s): "
-                f"{', '.join(str(ledger_index) for ledger_index, _ in failed_ledgers)}"
-            )
         return total_stored
 
     # ------------------------------------------------------------------
@@ -323,8 +345,6 @@ class XRPLIndexer:
                     print(f"Progress: {i}/{total_ledgers} ledgers processed, {total_stored} transactions stored")
                 if i < total_ledgers:
                     time.sleep(0.1)
-
-        self.db.update_last_processed_ledger_index(current_ledger_index)
 
         print("\nIndexing cycle complete!")
         print(f"Processed ledgers: {last_processed + 1} to {current_ledger_index}")

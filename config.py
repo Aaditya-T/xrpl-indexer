@@ -57,6 +57,10 @@ class Config:
 
     # Hub-and-spoke wallet tracking: address of the central wallet that funds user wallets
     CENTRAL_WALLET_ADDRESS = os.getenv("CENTRAL_WALLET_ADDRESS", "")
+    # Additional funding wallets. The legacy central wallet remains supported.
+    PARENT_WALLET_ADDRESSES = os.getenv("PARENT_WALLET_ADDRESSES", "")
+    # Opt-in discovery rules, independent of the transaction storage filters.
+    TRACK_SOURCE_TAGS = os.getenv("TRACK_SOURCE_TAGS", "")
 
     @staticmethod
     def get_filter_transaction_types():
@@ -78,3 +82,26 @@ class Config:
         if Config.FILTER_SOURCE_TAGS:
             return [int(t.strip()) for t in Config.FILTER_SOURCE_TAGS.split(",")]
         return []
+
+    @staticmethod
+    def get_parent_wallet_addresses():
+        """Return the legacy central wallet and any additional parent wallets."""
+        addresses = [Config.CENTRAL_WALLET_ADDRESS, *Config.PARENT_WALLET_ADDRESSES.split(",")]
+        return list(dict.fromkeys(address.strip() for address in addresses if address.strip()))
+
+    @staticmethod
+    def get_track_source_tags():
+        """Return the source tags that enroll wallets and retain matching txns."""
+        if not Config.TRACK_SOURCE_TAGS:
+            return []
+        try:
+            tags = [int(tag.strip()) for tag in Config.TRACK_SOURCE_TAGS.split(",")]
+        except ValueError as exc:
+            raise ValueError(
+                "TRACK_SOURCE_TAGS must be comma-separated unsigned 32-bit integers"
+            ) from exc
+        if any(tag < 0 or tag > 0xFFFFFFFF for tag in tags):
+            raise ValueError(
+                "TRACK_SOURCE_TAGS must be comma-separated unsigned 32-bit integers"
+            )
+        return tags

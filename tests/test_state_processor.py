@@ -1,7 +1,7 @@
 """
 Test suite for state_processor.py and hub-and-spoke wallet discovery.
 
-Uses a MockDB and MockIndexer — no real database or XRPL node needed.
+Uses a MockDB and the real XRPLIndexer discovery logic — no XRPL node needed.
 All AffectedNodes payloads are synthetic.
 """
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from typing import Optional
 from state_processor import StateProcessor, RIPPLE_EPOCH_OFFSET
+from indexer import XRPLIndexer
 from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
@@ -47,6 +48,9 @@ class MockDB:
         self.added_wallets.append((address, tx_hash))
         return True
 
+    def get_payments_for_discovery(self, parent_wallets, source_tags, after_id=0):
+        return []
+
     # -- account states ---------------------------------------------------
 
     def upsert_account_state(
@@ -69,7 +73,8 @@ class MockDB:
     def upsert_trustline(
         self, account, issuer, currency, balance, limit_amount, limit_peer,
         authorized, peer_authorized, no_ripple, no_ripple_peer,
-        freeze_flag, peer_freeze_flag, is_deleted, ledger_index,
+        freeze_flag, peer_freeze_flag, deep_freeze_flag, peer_deep_freeze_flag,
+        is_deleted, ledger_index,
     ):
         key = (account, issuer, currency)
         existing = self.trustlines.get(key)
@@ -81,6 +86,8 @@ class MockDB:
             "authorized": authorized, "peer_authorized": peer_authorized,
             "no_ripple": no_ripple, "no_ripple_peer": no_ripple_peer,
             "freeze_flag": freeze_flag, "peer_freeze_flag": peer_freeze_flag,
+            "deep_freeze_flag": deep_freeze_flag,
+            "peer_deep_freeze_flag": peer_deep_freeze_flag,
             "is_deleted": is_deleted, "ledger_index": ledger_index,
         }
 
@@ -124,45 +131,19 @@ class MockDB:
 
 
 # ---------------------------------------------------------------------------
-# Mock indexer (mirrors the real _check_wallet_discovery logic exactly)
+# Indexer with an in-memory database
 # ---------------------------------------------------------------------------
 
-def _has_account_root_creation(meta: dict, destination: str) -> bool:
-    """Mirrors the helper in indexer.py."""
-    for node_wrapper in meta.get("AffectedNodes", []):
-        if "CreatedNode" in node_wrapper:
-            node = node_wrapper["CreatedNode"]
-            if (node.get("LedgerEntryType") == "AccountRoot"
-                    and (node.get("NewFields") or {}).get("Account") == destination):
-                return True
-    return False
-
-
-class MockIndexer:
-    """Minimal stand-in that exercises the wallet-discovery logic."""
-
-    def __init__(self, db: MockDB, central_wallet: str = CENTRAL):
-        self.db = db
-        self.central_wallet = central_wallet
-
-    def _check_wallet_discovery(self, tx_data: dict, tx_hash: str):
-        if not self.central_wallet:
-            return
-        if tx_data.get("TransactionType") != "Payment":
-            return
-        if tx_data.get("Account") != self.central_wallet:
-            return
-        destination = tx_data.get("Destination")
-        if not destination:
-            return
-
-        full = tx_data.get("_full_data") or {}
-        meta = (full.get("meta") if isinstance(full, dict) else {}) or {}
-        if not isinstance(meta, dict):
-            return
-
-        if _has_account_root_creation(meta, destination):
-            self.db.add_tracked_wallet(destination, tx_hash)
+class MockIndexer(XRPLIndexer):
+    def __init__(
+        self, db: MockDB, central_wallet: str = CENTRAL,
+        parent_wallets: Optional[list[str]] = None,
+        track_source_tags: Optional[list[int]] = None,
+    ):
+        super().__init__(
+            db=db, xrpl_client=object(), central_wallet=central_wallet,
+            parent_wallets=parent_wallets or [], track_source_tags=track_source_tags or [],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +276,47 @@ class TestWalletDiscovery:
         idx._check_wallet_discovery(tx, "TXHASH004")
         assert USER_A not in db._tracked
 
+    def test_additional_parent_activates_wallet(self):
+        db = MockDB()
+        idx = MockIndexer(db, parent_wallets=[USER_B])
+        idx._check_wallet_discovery(_activation_tx(USER_B, USER_A), "TXHASH_PARENT")
+        assert db.added_wallets == [(USER_A, "TXHASH_PARENT")]
+
+    def test_configured_source_tag_activates_wallet_from_any_funder(self):
+        db = MockDB()
+        idx = MockIndexer(db, track_source_tags=[0, 123])
+        tx = _activation_tx(GATEWAY, USER_A)
+        tx["SourceTag"] = 0
+        idx._check_wallet_discovery(tx, "TXHASH_TAG")
+        assert db.added_wallets == [(USER_A, "TXHASH_TAG")]
+
+    def test_unconfigured_source_tag_does_not_activate_wallet(self):
+        db = MockDB()
+        idx = MockIndexer(db, track_source_tags=[123])
+        tx = _activation_tx(GATEWAY, USER_A)
+        tx["SourceTag"] = 456
+        idx._check_wallet_discovery(tx, "TXHASH_OTHER_TAG")
+        assert USER_A not in db._tracked
+
+    def test_source_tag_does_not_enroll_a_parent_wallet(self):
+        db = MockDB()
+        idx = MockIndexer(db, parent_wallets=[USER_B], track_source_tags=[123])
+        tx = _activation_tx(GATEWAY, USER_B)
+        tx["SourceTag"] = 123
+        idx._check_wallet_discovery(tx, "TXHASH_PARENT_ACTIVATION")
+        assert USER_B not in db._tracked
+
+    def test_matching_tag_without_account_creation_does_not_activate_wallet(self):
+        db = MockDB()
+        idx = MockIndexer(db, track_source_tags=[123])
+        tx = _activation_tx(GATEWAY, USER_A)
+        tx["SourceTag"] = 123
+        tx["_full_data"]["meta"]["AffectedNodes"] = [
+            _modified("AccountRoot", {"Account": USER_A, "Balance": "20000000"})
+        ]
+        idx._check_wallet_discovery(tx, "TXHASH_EXISTING")
+        assert USER_A not in db._tracked
+
     def test_duplicate_activation_does_not_re_add(self):
         db = MockDB(tracked={USER_A})
         idx = MockIndexer(db)
@@ -336,6 +358,27 @@ class TestWalletDiscovery:
             },
         }
         idx._check_wallet_discovery(tx, "TXHASH007")
+        assert USER_A not in db._tracked
+
+    def test_tracking_tag_retains_transaction_despite_storage_filters(self):
+        idx = MockIndexer(MockDB(), track_source_tags=[123])
+        idx.filter_tx_types = ["OfferCreate"]
+        idx.filter_addresses = [CENTRAL]
+        idx.filter_source_tags = [999]
+        tx = _activation_tx(GATEWAY, USER_A)
+        tx["SourceTag"] = 123
+        assert idx.should_include_transaction(tx)
+        tx["SourceTag"] = 456
+        assert not idx.should_include_transaction(tx)
+
+    def test_legacy_source_tag_filter_does_not_enroll_wallet(self):
+        db = MockDB()
+        idx = MockIndexer(db)
+        idx.filter_source_tags = [123]
+        tx = _activation_tx(GATEWAY, USER_A)
+        tx["SourceTag"] = 123
+        assert idx.should_include_transaction(tx)
+        idx._check_wallet_discovery(tx, "TXHASH_FILTER_ONLY")
         assert USER_A not in db._tracked
 
 

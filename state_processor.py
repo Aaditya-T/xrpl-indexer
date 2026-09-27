@@ -4,7 +4,7 @@ live state tables (account_states, trustlines, offers).
 
 Supported node types:
   AccountRoot  → account_states  (balance, sequence, owner_count, flags)
-  RippleState  → trustlines      (balance, limits, auth, freeze, no_ripple)
+  RippleState  → trustlines      (balance, limits, auth, freeze, deep freeze, no_ripple)
   Offer        → offers          (create / partial-fill / full-fill / cancel)
 
 All other node types (DirectoryNode, FeeSettings, …) are silently skipped.
@@ -30,6 +30,8 @@ _LSF_LOW_NO_RIPPLE  = 0x00100000
 _LSF_HIGH_NO_RIPPLE = 0x00200000
 _LSF_LOW_FREEZE     = 0x00400000
 _LSF_HIGH_FREEZE    = 0x00800000
+_LSF_LOW_DEEP_FREEZE  = 0x02000000
+_LSF_HIGH_DEEP_FREEZE = 0x04000000
 
 
 def ripple_epoch_to_iso(ripple_ts: int) -> str:
@@ -185,6 +187,8 @@ class StateProcessor:
                 no_ripple_peer  = bool(flags & _LSF_LOW_NO_RIPPLE)
                 freeze          = bool(flags & _LSF_HIGH_FREEZE)
                 peer_freeze     = bool(flags & _LSF_LOW_FREEZE)
+                deep_freeze      = bool(flags & _LSF_HIGH_DEEP_FREEZE)
+                peer_deep_freeze = bool(flags & _LSF_LOW_DEEP_FREEZE)
             else:
                 limit_amount    = low_limit.get("value", "0")
                 limit_peer      = high_limit.get("value", "0")
@@ -194,6 +198,8 @@ class StateProcessor:
                 no_ripple_peer  = bool(flags & _LSF_HIGH_NO_RIPPLE)
                 freeze          = bool(flags & _LSF_LOW_FREEZE)
                 peer_freeze     = bool(flags & _LSF_HIGH_FREEZE)
+                deep_freeze      = bool(flags & _LSF_LOW_DEEP_FREEZE)
+                peer_deep_freeze = bool(flags & _LSF_HIGH_DEEP_FREEZE)
 
             if deleted:
                 self.db.delete_trustline(account, peer, currency, ledger_index)
@@ -211,6 +217,8 @@ class StateProcessor:
                     no_ripple_peer=no_ripple_peer,
                     freeze_flag=freeze,
                     peer_freeze_flag=peer_freeze,
+                    deep_freeze_flag=deep_freeze,
+                    peer_deep_freeze_flag=peer_deep_freeze,
                     is_deleted=False,
                     ledger_index=ledger_index,
                 )
